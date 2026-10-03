@@ -94,7 +94,11 @@ ADL2_New_QueryPMLogData_Get(ctx, adapterIndex, &data);     // 每次读取
 | 通道 | 条件 | 说明 |
 | :--- | :--- | :--- |
 | WMI `MSFT_StorageReliabilityCounter.Temperature` | **需要管理员** | 首选；同时给磨损与通电时长 |
-| `IOCTL_STORAGE_QUERY_PROPERTY`（`StorageDeviceTemperatureProperty`=22 → `StorageAdapterTemperatureProperty`=21） | **需要管理员** | 兜底；对 `\\.\PhysicalDriveN` 发 IOCTL，读 `STORAGE_TEMPERATURE_INFO.Temperature`（对单位做兜底：>200 视为开尔文） |
+| `IOCTL_STORAGE_QUERY_PROPERTY`（`StorageDeviceTemperatureProperty`=22 → `StorageAdapterTemperatureProperty`=21） | **需要管理员** | 对 `\\.\PhysicalDriveN` 发 IOCTL，读 `STORAGE_TEMPERATURE_INFO.Temperature`（单位兜底：>200 视为开尔文）。NVMe 盘常返回 `err=1`（该属性主要给 ATA/SATA） |
+| `StorageDeviceProtocolSpecificProperty`=20（NVMe 健康日志，log page 0x02） | **需要管理员** | 对 `\\.\PhysicalDriveN` 发；取健康日志第 1~2 字节（开尔文） |
+| `StorageAdapterProtocolSpecificProperty`=19（NVMe 健康日志，走 StorPort 适配器） | **需要管理员** | **真实工具（smartctl / CrystalDiskInfo）用的就是这条**：目标句柄是 `GUID_DEVINTERFACE_STORAGEPORT` 枚举出的适配器设备接口（本机为 `\\?\pci#ven_1e49&dev_1031&...`），不是 `\\.\PhysicalDriveN` |
+
+诊断脚本：管理员运行 `tools\disk-temp-probe.ps1`，会一次性打印各通道的 Win32 错误码。`err=1` 表示 `ERROR_INVALID_FUNCTION`（功能不被驱动支持），`err=5` 表示未提权。
 
 两条都需要提权，而 **exe 本身就是 `requireAdministrator`**，所以正常使用下应能显示；
 把盘接在 USB 硬盘盒等场景可能两条都不支持，届时显示「未实现」并写明原因。

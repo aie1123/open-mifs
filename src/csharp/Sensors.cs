@@ -707,6 +707,7 @@ namespace OpenMIFS
                             + (relError.Length > 0 ? "（" + relError + "）" : "，DeviceId 没配上"));
                         int? io = DiskTemperatureIoctl(idx, why);
                         if (!io.HasValue) io = NvmeTemperatureIoctl(idx, why);
+                        if (!io.HasValue) io = StorportTemperatureIoctl(why);
                         if (io.HasValue)
                         {
                             tempText = io.Value.ToString(CultureInfo.InvariantCulture) + " ℃";
@@ -942,6 +943,117 @@ namespace OpenMIFS
         private const int ProtocolTypeNvme = 3;
         private const int NvmeDataTypeLogPage = 2;
         private const int NvmeLogPageHealthInfo = 0x02;
+
+        // ─────────────── StorPort 适配器通道（真实工具的做法）
+        // NVMe 的协议专用查询在 smartctl/CrystalDiskInfo 这类工具里是向"StorPort 适配器设备接口"
+        // 发的（GUID_DEVINTERFACE_STORAGEPORT），而不是 \\.\PhysicalDriveN，也不是猜的 \\.\Scsi0:。
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SP_DEVICE_INTERFACE_DATA { public uint cbSize; public Guid InterfaceClassGuid; public uint Flags; public IntPtr Reserved; }
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr SetupDiGetClassDevsW(ref Guid classGuid, IntPtr enumerator, IntPtr hwndParent, uint flags);
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool SetupDiEnumDeviceInterfaces(IntPtr h, IntPtr devInfo, ref Guid guid, uint index, ref SP_DEVICE_INTERFACE_DATA data);
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool SetupDiGetDeviceInterfaceDetailW(IntPtr h, ref SP_DEVICE_INTERFACE_DATA data, IntPtr detail, uint detailSize, out uint required, IntPtr devInfo);
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiDestroyDeviceInfoList(IntPtr h);
+
+        private static string[] StorportAdapterPaths()
+        {
+            List<string> list = new List<string>();
+            Guid guid = new Guid("2accfe60-c130-11d2-b082-00a0c91efb8b");   // GUID_DEVINTERFACE_STORAGEPORT
+            IntPtr h = SetupDiGetClassDevsW(ref guid, IntPtr.Zero, IntPtr.Zero, 0x02 | 0x10);
+            if (h == new IntPtr(-1)) return list.ToArray();
+            try
+            {
+                SP_DEVICE_INTERFACE_DATA did = new SP_DEVICE_INTERFACE_DATA();
+                did.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA));
+                uint i = 0;
+                while (SetupDiEnumDeviceInterfaces(h, IntPtr.Zero, ref guid, i, ref did))
+                {
+                    IntPtr detail = Marshal.AllocHGlobal(1024);
+                    try
+                    {
+                        Marshal.WriteInt32(detail, IntPtr.Size == 8 ? 8 : 6);   // cbSize of SP_DEVICE_INTERFACE_DETAIL_DATA
+                        uint need = 0;
+                        if (SetupDiGetDeviceInterfaceDetailW(h, ref did, detail, 1024, out need, IntPtr.Zero))
+                            list.Add(Marshal.PtrToStringUni(new IntPtr(detail.ToInt64() + 4)));
+                    }
+                    finally { Marshal.FreeHGlobal(detail); }
+                    i++;
+                }
+            }
+            finally { SetupDiDestroyDeviceInfoList(h); }
+            return list.ToArray();
+        }
+
+        /// <summary>向 StorPort 适配器发协议专用查询（property 19）读 NVMe 健康日志温度。</summary>
+        private static int? StorportTemperatureIoctl(List<string> why)
+        {
+            string[] paths = StorportAdapterPaths();
+            if (paths.Length == 0) { why.Add("StorPort 适配器 0 个"); return null; }
+            for (int a = 0; a < paths.Length; a++)
+            {
+                int? t = ProtocolSpecificTemperature(paths[a], StorageAdapterProtocolSpecificProperty, why, "StorPort 适配器");
+                if (t.HasValue) return t;
+            }
+            return null;
+        }
+
+        private const int StorageAdapterProtocolSpecificProperty = 19;
+
+        /// <summary>协议专用查询的公共实现（设备通道与适配器通道共用）。</summary>
+        private static int? ProtocolSpecificTemperature(string path, int propertyId, List<string> why, string tag)
+        {
+            const int QuerySize = 12, ProtoSize = 40, DataSize = 512;
+            const int Total = QuerySize + ProtoSize + DataSize;
+            IntPtr h = IntPtr.Zero, buf = IntPtr.Zero;
+            try
+            {
+                h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (h == new IntPtr(-1))
+                {
+                    why.Add(tag + " 打不开 err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                    return null;
+                }
+                buf = Marshal.AllocHGlobal(Total);
+                for (int i = 0; i < Total; i++) Marshal.WriteByte(buf, i, 0);
+                Marshal.WriteInt32(buf, 0, propertyId);
+                Marshal.WriteInt32(buf, 4, 0);
+                int p = QuerySize;
+                Marshal.WriteInt32(buf, p + 0, ProtocolTypeNvme);
+                Marshal.WriteInt32(buf, p + 4, NvmeDataTypeLogPage);
+                Marshal.WriteInt32(buf, p + 8, NvmeLogPageHealthInfo);
+                Marshal.WriteInt32(buf, p + 12, 0);
+                Marshal.WriteInt32(buf, p + 16, ProtoSize);
+                Marshal.WriteInt32(buf, p + 20, DataSize);
+                uint ret = 0;
+                if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, buf, (uint)Total, buf, (uint)Total, out ret, IntPtr.Zero))
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    why.Add(tag + " 协议专用 " + propertyId.ToString(CultureInfo.InvariantCulture) + " err=" + err.ToString(CultureInfo.InvariantCulture));
+                    return null;
+                }
+                int off = QuerySize + ProtoSize;
+                int kelvin = (int)Marshal.ReadByte(buf, off + 1) | ((int)Marshal.ReadByte(buf, off + 2) << 8);
+                int t = kelvin > 0 ? (int)Math.Round(kelvin - 273.15) : 0;
+                if (t > 0 && t < 120)
+                {
+                    Log.Info("传感器：磁盘温度来自 " + tag + " NVMe 健康日志 → " + t.ToString(CultureInfo.InvariantCulture)
+                        + " ℃（原始 " + kelvin.ToString(CultureInfo.InvariantCulture) + " K）");
+                    return t;
+                }
+                why.Add(tag + " 健康日志温度不合理(" + kelvin.ToString(CultureInfo.InvariantCulture) + " K)");
+                return null;
+            }
+            catch (Exception ex) { why.Add(tag + " 异常 " + ex.Message); return null; }
+            finally
+            {
+                if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+                if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
+            }
+        }
 
         private static int? NvmeTemperatureIoctl(int driveIndex, List<string> why)
         {

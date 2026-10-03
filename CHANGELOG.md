@@ -15,6 +15,26 @@
 - 记下一条可复用的判据规矩：凡"写入是否真的生效"，都要找一个**独立于寄存器镜像的物理量**
   （风扇看转速、性能模式看实测性能百分比、充电看实际注入电量）—— 这次误判就是只看了寄存器镜像
 
+## [0.4.2] - 2026-10-03
+
+### 新增 / 诊断
+
+- **新增第 4 条磁盘温度通道：StorPort 适配器协议专用查询。**
+  实测本机 NVMe 控制器跑的是微软自带 `stornvme`（不是 AMD RAID/VMD），
+  但 `\\.\PhysicalDriveN` 上的三条通道在提权下仍返回 `err=1`（`ERROR_INVALID_FUNCTION`）——
+  说明请求没被驱动认领。真实工具（smartctl / CrystalDiskInfo）对 NVMe 是把协议专用查询
+  **发给 StorPort 适配器设备接口**（`GUID_DEVINTERFACE_STORAGEPORT`，本机枚举到 1 个：
+  `\\?\pci#ven_1e49&dev_1031&...`），所以新增这条通道（`StorageAdapterProtocolSpecificProperty`=19）
+  - 现在共 4 条：WMI 可靠性计数器 → 温度属性 IOCTL → NVMe 健康日志（设备）→ **StorPort 适配器健康日志**
+- **新增诊断脚本 [tools/disk-temp-probe.ps1](tools/disk-temp-probe.ps1)**（管理员运行，只读）：
+  一次性打印 5 条通道的 Win32 错误码 + WMI 实例数，用来区分"平台不暴露"与"我们调用方式不对"
+- 磁盘温度的鼠标悬停提示现在把 4 条通道各自的失败原因全部列出
+
+### 说明
+
+错误码含义：`1`=`ERROR_INVALID_FUNCTION`（功能不被支持）、`5`=`ERROR_ACCESS_DENIED`（未提权）、
+`87`=`ERROR_INVALID_PARAMETER`、`122`=`ERROR_INSUFFICIENT_BUFFER`。
+
 ## [0.4.1] - 2026-10-03
 
 ### 修复 / 增强
