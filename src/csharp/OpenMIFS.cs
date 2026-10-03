@@ -1044,12 +1044,11 @@ namespace OpenMIFS
         private readonly Button _btnRecap = new Button();
         private readonly CheckBox _chkDpi = new CheckBox();
         private readonly Label _lblDpi = new Label();
-        private readonly TabControl _tabs = new TabControl();
-        private TabPage _tabSensors;
         private readonly TextBox _txtSensors = new TextBox();
         private readonly Panel _pnlSensorBar = new Panel();
         private readonly Button _btnSensorProbe = new Button();
-        private readonly Button _btnGoSensors = new Button();
+        private readonly Label _lblResizeHint = new Label();
+        private GroupBox _gbSensors;
         private readonly Label _lblSensorHint = new Label();
         private DateTime _lastSensorRefresh = DateTime.MinValue;
         private readonly TextBox _txtStatus = new TextBox();
@@ -1087,10 +1086,11 @@ namespace OpenMIFS
         public MainForm()
         {
             Text = "OpenMIFS — 同方 MIFS 控制台";
-            ClientSize = new Size(480, 712);
+            ClientSize = new Size(940, 660);
+            MinimumSize = new Size(700, 560);
             StartPosition = FormStartPosition.CenterScreen;
-            FormBorderStyle = FormBorderStyle.FixedSingle;
-            MaximizeBox = false;
+            FormBorderStyle = FormBorderStyle.Sizable;   // 可拖动缩放：右列数据区跟着窗口变大
+            MaximizeBox = true;
             Font = _fontUi;
 
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
@@ -1223,13 +1223,20 @@ namespace OpenMIFS
         }
 
         // ────────────────────────────────────────────────────── UI 构建
+        // 布局：左列 = 硬件控制（固定宽度），右列 = 状态 + 传感器（随窗口缩放）
+        private const int LeftColX = 12;
+        private const int LeftColW = 456;
+        private const int RightColX = 480;
+        private const int RightColGap = 12;
+
         private GroupBox NewGroup(string text, int y, int h)
         {
             GroupBox g = new GroupBox();
             g.Text = text;
-            g.Location = new Point(12, y);
-            g.Size = new Size(456, h);
+            g.Location = new Point(LeftColX, y);
+            g.Size = new Size(LeftColW, h);
             g.Font = _fontUi8;
+            g.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             Controls.Add(g);
             return g;
         }
@@ -1238,7 +1245,8 @@ namespace OpenMIFS
         {
             // 顶部状态条：两行文字，高度给足，避免第二行被下面的分组框压掉
             _lblHeader.Location = new Point(14, 6);
-            _lblHeader.Size = new Size(452, 46);
+            _lblHeader.Size = new Size(ClientSize.Width - 26, 46);
+            _lblHeader.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             _lblHeader.Font = _fontUi8;
             _lblHeader.Text = "正在检测接口…";
             _lblHeader.AutoSize = false;
@@ -1385,7 +1393,7 @@ namespace OpenMIFS
             _lblDpi.AutoSize = false;
             gOsd.Controls.Add(_lblDpi);
 
-            // 状态面板 / 传感器面板（用选项卡共用一块区域，不额外加高窗口）
+            // ── 右列：状态 + 传感器，直接摆在首页，随窗口缩放
             _txtStatus.Multiline = true;
             _txtStatus.ReadOnly = true;
             _txtStatus.ScrollBars = ScrollBars.Vertical;
@@ -1401,8 +1409,7 @@ namespace OpenMIFS
             _txtSensors.Font = new Font("Consolas", 9F);
             _txtSensors.Dock = DockStyle.Fill;
             _txtSensors.BackColor = Color.FromArgb(250, 250, 250);
-            _txtSensors.Text = "切到本页会开始读取传感器（只读，不需要额外驱动）。" + Environment.NewLine
-                + "点下面的「探测数据源」可以看本机到底有哪些传感器通道可用。";
+            _txtSensors.Text = "正在读取传感器（只读，不需要额外驱动）…";
 
             _pnlSensorBar.Dock = DockStyle.Bottom;
             _pnlSensorBar.Height = 34;
@@ -1414,58 +1421,48 @@ namespace OpenMIFS
             _pnlSensorBar.Controls.Add(_btnSensorProbe);
 
             _lblSensorHint.Location = new Point(122, 9);
-            _lblSensorHint.Size = new Size(320, 18);
+            _lblSensorHint.Size = new Size(360, 18);
+            _lblSensorHint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             _lblSensorHint.Font = _fontUi8;
             _lblSensorHint.Text = "只读：PDH + WMI + MIFS，不加载任何驱动";
             _lblSensorHint.AutoSize = false;
             _pnlSensorBar.Controls.Add(_lblSensorHint);
 
-            TabPage pageStatus = new TabPage("状态");
-            pageStatus.UseVisualStyleBackColor = true;
-            pageStatus.Controls.Add(_txtStatus);
+            int rightW = ClientSize.Width - RightColX - RightColGap;
 
-            _tabSensors = new TabPage("传感器");
-            _tabSensors.UseVisualStyleBackColor = true;
-            _tabSensors.Controls.Add(_txtSensors);
-            _tabSensors.Controls.Add(_pnlSensorBar);
+            GroupBox gStatus = new GroupBox();
+            gStatus.Text = "状态";
+            gStatus.Font = _fontUi8;
+            gStatus.Location = new Point(RightColX, 58);
+            gStatus.Size = new Size(rightW, 168);
+            gStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            gStatus.Controls.Add(_txtStatus);
+            Controls.Add(gStatus);
 
-            _tabs.Location = new Point(12, 516);
-            _tabs.Size = new Size(456, 150);
-            _tabs.Font = _fontUi;
-            _tabs.TabPages.Add(pageStatus);
-            _tabs.TabPages.Add(_tabSensors);
-            _tabs.SelectedIndex = 1;   // 默认停在「传感器」页：标签太不显眼，用户反馈"找不到入口"
-            _tabs.SelectedIndexChanged += delegate
-            {
-                if (_tabs.SelectedTab == _tabSensors) RefreshSensors();
-            };
-            Controls.Add(_tabs);
-
-            // 底部行再加一个显眼的「传感器」按钮，一键跳到那一页
-            _btnGoSensors.Text = "传感器";
-            _btnGoSensors.Location = new Point(272, 671);
-            _btnGoSensors.Size = new Size(96, 28);
-            _btnGoSensors.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
-            _btnGoSensors.Click += delegate
-            {
-                Log.Info("按钮进入传感器页");
-                _tabs.SelectedIndex = _tabs.TabPages.IndexOf(_tabSensors);
-                RefreshSensors();
-            };
-            Controls.Add(_btnGoSensors);
+            _gbSensors = new GroupBox();
+            _gbSensors.Text = "传感器（CPU 功耗 / 温度 / GPU / 内存 / 磁盘 / 风扇 / 电池）";
+            _gbSensors.Font = _fontUi8;
+            _gbSensors.Location = new Point(RightColX, 234);
+            _gbSensors.Size = new Size(rightW, ClientSize.Height - 234 - 52);
+            _gbSensors.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            _gbSensors.Controls.Add(_txtSensors);
+            _gbSensors.Controls.Add(_pnlSensorBar);
+            Controls.Add(_gbSensors);
 
             // 底部
             _chkAuto.Text = "自动刷新";
-            _chkAuto.Location = new Point(14, 676);
+            _chkAuto.Location = new Point(14, ClientSize.Height - 36);
             _chkAuto.Size = new Size(92, 22);
             _chkAuto.Checked = true;
             _chkAuto.Font = _fontUi8;
+            _chkAuto.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             Controls.Add(_chkAuto);
 
-            _cmbInterval.Location = new Point(110, 675);
+            _cmbInterval.Location = new Point(110, ClientSize.Height - 37);
             _cmbInterval.Size = new Size(66, 22);
             _cmbInterval.DropDownStyle = ComboBoxStyle.DropDownList;
             _cmbInterval.Font = _fontUi8;
+            _cmbInterval.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             _cmbInterval.Items.AddRange(new object[] { "2 秒", "3 秒", "5 秒", "10 秒" });
             _cmbInterval.SelectedIndex = 1;
             _cmbInterval.SelectedIndexChanged += OnIntervalChanged;
@@ -1473,18 +1470,28 @@ namespace OpenMIFS
 
             Button btnRefresh = new Button();
             btnRefresh.Text = "刷新";
-            btnRefresh.Location = new Point(374, 671);
+            btnRefresh.Location = new Point(ClientSize.Width - 106, ClientSize.Height - 41);
             btnRefresh.Size = new Size(94, 28);
             btnRefresh.Font = new Font("Microsoft YaHei UI", 9F);
+            btnRefresh.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             btnRefresh.Click += delegate { Log.Info("手动刷新"); RefreshAll(); };
             Controls.Add(btnRefresh);
+
+            _lblResizeHint.Location = new Point(188, ClientSize.Height - 33);
+            _lblResizeHint.Size = new Size(220, 18);
+            _lblResizeHint.Font = _fontUi8;
+            _lblResizeHint.ForeColor = ColDim;
+            _lblResizeHint.Text = "窗口可拖动缩放，右侧数据区会跟着变大";
+            _lblResizeHint.AutoSize = false;
+            _lblResizeHint.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            Controls.Add(_lblResizeHint);
         }
 
         // ────────────────────────────────────────────────────── 传感器
-        /// <summary>读取并渲染传感器面板（只在「传感器」页可见时才做，省开销）。</summary>
+        /// <summary>读取并渲染传感器面板（首页直接展示；窗口最小化到托盘后跳过，省开销）。</summary>
         public void RefreshSensors()
         {
-            if (_tabs.SelectedTab != _tabSensors) return;
+            if (!Visible) return;
             if ((DateTime.Now - _lastSensorRefresh).TotalSeconds < 2) return;
             _lastSensorRefresh = DateTime.Now;
             try
@@ -1743,8 +1750,7 @@ namespace OpenMIFS
             {
                 Log.Info("开始 OSD 诊断");
                 string text = Osd.Diagnose();
-                _txtStatus.Text = text;
-                _tabs.SelectedIndex = 0;   // 诊断结果写在「状态」页，自动切过去让用户看到
+                _txtStatus.Text = text;   // 诊断结果直接显示在首页右侧的「状态」框里
                 MessageBox.Show(this,
                     "诊断完成，已写入：\r\n" + Path.Combine(Log.Folder, "osd-diagnose.txt") +
                     "\r\n\r\n内容已同时显示在下方状态面板。",
