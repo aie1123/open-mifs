@@ -52,7 +52,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status', 'probe', 'test', 'scan', 'bench', 'mode', 'fanboost', 'kbd', 'raw', 'osd', 'startup', 'log', 'sensors')]
+    [ValidateSet('status', 'probe', 'test', 'scan', 'bench', 'mode', 'fanboost', 'kbd', 'raw', 'osd', 'startup', 'log', 'sensors', 'fan')]
     [string]$Action = 'status',
 
     [Parameter(Position = 1)]
@@ -468,7 +468,7 @@ function Invoke-FanTest {
     Write-Host ''
     Write-Host '===== 风扇满速实测（按转速验证，不看寄存器读回）=====' -ForegroundColor Cyan
     $ac = Get-MifsByte -Func $FNUM['AC_TYPE']
-    $acName = switch ([int]$ac) { 0 { '电池供电' } 1 { 'Type-C 供电' } 2 { '圆口 DC 供电' } default { "原始值 $ac" } }
+    $acName = if ($null -eq $ac) { '读不到（需要管理员）' } else { switch ([int]$ac) { 0 { '电池供电' } 1 { 'Type-C 供电' } 2 { '圆口 DC 供电' } default { "原始值 $ac" } } }
     Write-Host ("当前供电   : {0}" -f $acName)
 
     $base = @()
@@ -505,7 +505,7 @@ function Invoke-FanTest {
         Write-Host '   OpenMIFS 已改为按转速判定，风扇满速按钮可用。' -ForegroundColor Green
     } else {
         Write-Host ("❌ 转速没有明显变化（{0} RPM）—— 该状态下 EC 不执行风扇满速" -f $delta) -ForegroundColor Yellow
-        if ([int]$ac -eq 1) {
+        if ($null -ne $ac -and [int]$ac -eq 1) {
             Write-Host '   当前是 Type-C(PD) 供电；上游驱动文档说该状态下满速被硬件禁用。' -ForegroundColor Yellow
             Write-Host '   若本机没有圆口 DC 供电口，MIFS 这条路走不通，只能走 EC RAM（PawnIO 等），' -ForegroundColor Yellow
             Write-Host '   见 docs/FAN-CONTROL.md。' -ForegroundColor Yellow

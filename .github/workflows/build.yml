@@ -37,6 +37,26 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      - name: CLI 动作一致性检查
+        shell: pwsh
+        run: |
+          # 踩过的坑：给 mifs.ps1 加了新的 switch 分支，却忘了加进 ValidateSet，
+          # 结果参数校验直接把命令拒掉（v0.3.5 的 `fan` 就是这样漏出去的）。
+          $text = Get-Content -Raw src/mifs.ps1
+          $vs = [regex]::Match($text, "\[ValidateSet\(([^)]*)\)\]").Groups[1].Value
+          $allowed = [regex]::Matches($vs, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value }
+          $sw = [regex]::Match($text, "(?s)switch \(\`$Action\) \{(.*?)\r?\n    \}").Groups[1].Value
+          $cases = [regex]::Matches($sw, "(?m)^\s{8}'([^']+)'\s*\{") | ForEach-Object { $_.Groups[1].Value }
+          if ($cases.Count -lt 5) { Write-Host "::error::没能解析出 switch 分支（正则失效？）"; exit 1 }
+          Write-Host "ValidateSet: $($allowed -join ', ')"
+          Write-Host "switch 分支: $($cases -join ', ')"
+          $missing = @($cases | Where-Object { $_ -notin $allowed })
+          if ($missing.Count) {
+            Write-Host "::error::$($missing -join ', ') 在 switch 里有分支，但不在 ValidateSet 里 —— 该动作会被参数校验直接拒绝"
+            exit 1
+          }
+          Write-Host 'OK 所有 switch 分支都在 ValidateSet 内'
+
       - name: UTF-8 BOM 检查
         shell: pwsh
         run: |

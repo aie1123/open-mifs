@@ -2,6 +2,22 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.6] - 2026-10-03
+
+### 修复
+
+- **`.\mifs.ps1 fan` 被参数校验拒掉**：0.3.5 给 CLI 加了 `fan` 的 switch 分支，却漏了把它加进 `ValidateSet`，
+  于是 `mifs.ps1 fan test` 直接报「参数不属于 ValidateSet 集合」。已补上并**逐个动作冒烟验证**
+  （status / probe / test / scan / raw / osd status / osd diagnose / startup status / log /
+  sensors / sensors probe / fan test / mode / fanboost / kbd 共 15 个动作全部通过）
+- `fan test` 在非管理员下会把 `$null` 的供电类型显示成"电池供电"，改为"读不到（需要管理员）"
+
+### 新增
+
+- CI 增加「CLI 动作一致性检查」：解析 `mifs.ps1` 的 `ValidateSet` 与主 `switch` 分支，
+  任何分支不在 ValidateSet 内就构建失败 —— 这次的漏检以后不会再发生
+  （已做反向验证：故意去掉 `fan` 能检出）
+
 ## [0.3.5] - 2026-10-03
 
 ### 修复
