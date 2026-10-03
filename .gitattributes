@@ -1,0 +1,22 @@
+# 统一换行符，避免跨平台 checkout 后 cmd.exe 解析错乱
+#
+# 背景：cmd.exe 只认 CRLF。若 .cmd 以 LF 存储，在 Windows 上被 checkout 后
+# 会出现「注释被当命令执行」「无限循环输出」等诡异现象。
+# 早期版本的 mifs.cmd 就踩过这个坑，这里强制固定。
+
+* text=auto
+
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.md   text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.7z  binary
+*.zip binary

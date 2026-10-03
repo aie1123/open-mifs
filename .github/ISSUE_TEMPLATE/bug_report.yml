@@ -1,0 +1,73 @@
+name: Bug 反馈
+description: 功能不工作、报错、或界面异常
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！为了能定位问题，请务必附上机型信息和 `probe` / `test` 的完整输出。
+
+  - type: input
+    id: model
+    attributes:
+      label: 机型全称
+      description: 例如 MECHREVO WUJIE14 PRO / 无界14 Pro 2023
+      placeholder: MECHREVO WUJIE14 PRO
+    validations:
+      required: true
+
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      placeholder: AMD Ryzen 7 7840HS
+    validations:
+      required: true
+
+  - type: input
+    id: bios
+    attributes:
+      label: BIOS 版本与日期
+      description: 运行 `Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS' | Select-Object BIOSVersion, BIOSReleaseDate`
+      placeholder: T140_PHX_V20 / 2024-01-08
+    validations:
+      required: true
+
+  - type: dropdown
+    id: official
+    attributes:
+      label: 是否安装过官方控制中心
+      options:
+        - 没装过
+        - 装过，已卸载
+        - 装着
+        - 该机型官方从来没有控制中心
+    validations:
+      required: true
+
+  - type: textarea
+    id: probe
+    attributes:
+      label: probe 输出
+      description: 运行 `.\mifs.cmd probe` 并粘贴完整输出
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: test
+    attributes:
+      label: test 输出
+      description: 运行 `.\mifs.cmd test` 并粘贴完整输出
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 问题描述
+      description: 你做了什么、期望什么、实际发生了什么。如果是某个功能无反应，请说明是否用 `raw` 读过写前写后的值。
+    validations:
+      required: true

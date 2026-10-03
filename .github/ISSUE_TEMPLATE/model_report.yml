@@ -1,0 +1,78 @@
+name: 机型实测数据
+description: 提交你自己机型的功能号探测结果，用于扩充支持列表
+title: "[机型] "
+labels: ["model-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这是最有价值的贡献类型 —— 每一份实测数据都能让后来的同型号用户少走弯路。
+
+        请先运行：
+        ```powershell
+        .\mifs.cmd probe
+        .\mifs.cmd test
+        .\mifs.cmd scan 63
+        .\mifs.cmd bench
+        ```
+
+  - type: input
+    id: model
+    attributes:
+      label: 机型全称
+      placeholder: MECHREVO WUJIE14 PRO
+    validations:
+      required: true
+
+  - type: input
+    id: board
+    attributes:
+      label: 主板型号
+      description: 运行 `Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS' | Select-Object BaseBoardProduct`
+      placeholder: WUJIE14 Series-PHX
+    validations:
+      required: true
+
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      placeholder: AMD Ryzen 7 7840HS
+    validations:
+      required: true
+
+  - type: input
+    id: bios
+    attributes:
+      label: BIOS 版本与日期
+      placeholder: T140_PHX_V20 / 2024-01-08
+    validations:
+      required: true
+
+  - type: textarea
+    id: test
+    attributes:
+      label: test 输出
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: scan
+    attributes:
+      label: scan 输出
+      description: 如果太长，只贴「不在驱动清单里」的那些行也可以
+      render: text
+
+  - type: textarea
+    id: bench
+    attributes:
+      label: bench 输出
+      description: 用于确定本机性能模式的取值编码
+      render: text
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 补充说明
+      description: 各档模式的主观感受（噪音/发热）、有没有官方控制中心、电池充电阈值能不能设、等等

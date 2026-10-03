@@ -1,0 +1,18 @@
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+*~
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+
+# 系统
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 本地测试产物
+/test-output/
