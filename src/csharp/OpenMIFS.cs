@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.3.4.0")]
-[assembly: AssemblyFileVersion("0.3.4.0")]
+[assembly: AssemblyVersion("0.3.5.0")]
+[assembly: AssemblyFileVersion("0.3.5.0")]
 
 namespace OpenMIFS
 {
@@ -376,6 +376,23 @@ namespace OpenMIFS
         public static void SetFanBoost(byte value)
         {
             Call(CmdSet, FnMaxFanSwitch, new byte[] { 0, value });
+        }
+
+        /// <summary>在 ms 毫秒内轮询风扇转速，返回采样到的最大值。
+        /// 用途：EC 可能不更新寄存器镜像却照做，所以"到底转没转起来"只能看转速。</summary>
+        public static int FanPeak(int ms, int fallback)
+        {
+            int peak = fallback;
+            int spent = 0;
+            while (spent < ms)
+            {
+                int[] f = GetFans();
+                if (f != null && f[0] > peak) peak = f[0];
+                Thread.Sleep(400);
+                System.Windows.Forms.Application.DoEvents();
+                spent += 400;
+            }
+            return peak;
         }
 
         /// <summary>读取三个风扇转速（RPM），失败返回 null。</summary>
@@ -1173,6 +1190,7 @@ namespace OpenMIFS
         private string _pendingHint;
         private bool _sensorBusy;
         private int _acTypeNow = -1;
+        private int _fanRpmBefore = -1;
         private readonly Label _lblOsd = new Label();
         private readonly Button _btnOsdRestart = new Button();
         private readonly Button _btnOsdDiag = new Button();
@@ -1903,11 +1921,29 @@ namespace OpenMIFS
             catch (Exception ex) { Log.Ex("切换性能模式失败", ex); Warn("切换失败：" + ex.Message); }
         }
 
+        /// <summary>在 ms 毫秒内轮询风扇转速，返回采样到的最大值（用于判断"到底转没转起来"）。</summary>
+        private int FanPeak(int ms, int fallback)
+        {
+            int peak = fallback;
+            int spent = 0;
+            while (spent < ms)
+            {
+                int[] f = Mifs.GetFans();
+                if (f != null && f[0] > peak) peak = f[0];
+                Thread.Sleep(400);
+                Application.DoEvents();
+                spent += 400;
+            }
+            return peak;
+        }
+
         private void OnFanBoostClick(object sender, EventArgs e)
         {
             if (_suppress) return;
             try
             {
+                int[] f0 = Mifs.GetFans();
+                _fanRpmBefore = (f0 != null && f0[0] > 0) ? f0[0] : -1;
                 if (!_fanBoostUsable)
                 {
                     Log.Info("风扇满速：按钮不可用（能力探测判定本机未实现）");
@@ -1922,21 +1958,40 @@ namespace OpenMIFS
 
                 if (back.HasValue && back.Value != target)
                 {
-                    // EC 接受了命令但值没变 → 本机未实现该开关，缓存结论并禁用按钮
+                    // 寄存器读回没变 —— 但 EC 可能"不更新寄存器镜像却照做"，真正的判据是风扇转速。
+                    // 实测：开 4 秒看转速有没有起来，再决定是不是真的不支持。
+                    int before = _fanRpmBefore;
+                    Log.Info("风扇满速：读回值没变，改用转速验证（基线 " + before + " RPM，采样 4 秒）");
+                    _btnBoost.Text = "风扇满速：验证中…";
+                    Application.DoEvents();
+                    int after = Mifs.FanPeak(4000, before);
+
+                    if (target == 1 && after - before >= 250)
+                    {
+                        Caps.FanBoost = true;
+                        Caps.FanBoostAcType = _acTypeNow;
+                        Caps.Save();
+                        Log.Info("风扇满速：转速 " + before + " → " + after + " RPM → 判定可用（寄存器读回不跟随）");
+                        RefreshAll();
+                        PrimeOsdWatch();
+                        ShowOsd("风扇满速 · 开");
+                        Warn("风扇确实加速了：" + before + " → " + after + " RPM。"
+                            + "\r\n\r\n这台的 EC 不把状态写回寄存器（读回恒为 0），但动作生效 —— "
+                            + "所以之前用「读回值」判定「未实现」是错的，已改为按转速判定。");
+                        return;
+                    }
+
                     Caps.FanBoost = false;
                     Caps.FanBoostAcType = _acTypeNow;
                     Caps.Save();
-                    Log.Warn("风扇满速：写 " + target + " 但读回 " + back.Value + " → 判定不可用（当时供电="
+                    Log.Warn("风扇满速：读回没变且转速没起来（" + before + " → " + after + " RPM）→ 不可用（供电="
                         + Mifs.AcTypeName(_acTypeNow) + "）");
                     RefreshAll();
-                    if (_acTypeNow == 1)
-                        Warn("EC 忽略了这次写入。**但这很可能是供电类型的限制**："
-                            + "\r\n上游 tongfang-mifs-wmi 驱动文档写明：Type-C(PD) 供电下，"
-                            + "\r\n性能/满速模式与风扇满速都被硬件禁用，只有插圆口 DC 电源才放开。"
-                            + "\r\n\r\n请插上圆口电源后重试（结论会按供电类型分别记录，不会误判为「本机不支持」）。");
-                    else
-                        Warn("本机 EC 忽略风扇满速写入（写 " + target + " 读回 " + back.Value
-                            + "，供电=" + Mifs.AcTypeName(_acTypeNow) + "），已标记为不可用。");
+                    Warn("EC 没有执行这次写入：转速几乎没变（" + before + " → " + after + " RPM），寄存器读回也没变。"
+                        + "\r\n\r\n当前供电：" + Mifs.AcTypeName(_acTypeNow)
+                        + "\r\n上游驱动文档说该状态（电池 / Type-C）下满速被硬件禁用；"
+                        + "\r\n如果这台机器只有 USB-C 供电口，那 MIFS 这条路走不通，"
+                        + "\r\n只能走 EC RAM（需要 PawnIO 这类签名驱动），见 docs/FAN-CONTROL.md。");
                     return;
                 }
                 if (!Caps.ValidFor(_acTypeNow)) { Caps.FanBoost = true; Caps.FanBoostAcType = _acTypeNow; Caps.Save(); }

@@ -35,6 +35,7 @@
     .\mifs.ps1 startup status      开机自启（计划任务 OpenMIFS）状态
     .\mifs.ps1 startup on|off      开关开机自启（计划任务 /RL HIGHEST，登录时不弹 UAC）
     .\mifs.ps1 log                 打印日志路径并显示最后 20 行
+    .\mifs.ps1 fan test            风扇满速实测：按转速判定（会先开再关，全程可逆）
 
   日志
     与图形版共用同一份日志：%LOCALAPPDATA%\OpenMIFS\openmifs.log（超过 1 MB 自动轮转）。
@@ -458,6 +459,66 @@ function Set-StartupTask {
     Write-MifsLog 'INFO ' ("开机自启 => {0}（exit={1}）{2}" -f $(if ($Enable) { 'on' } else { 'off' }), $r.ExitCode, $r.Output)
     if ($r.ExitCode -ne 0) { Write-Host ("设置失败（exit={0}）" -f $r.ExitCode) -ForegroundColor Red }
     else { Write-Host ("开机自启已{0}（计划任务 OpenMIFS，/RL HIGHEST，登录时不弹 UAC）" -f $(if ($Enable) { '启用' } else { '关闭' })) -ForegroundColor Green }
+}
+
+# ──────────────────────────────── 风扇实测（转速验证）
+# 之前的判定用"寄存器读回值是否变化"，但 EC 可能不更新寄存器镜像却照做 ——
+# 真正的判据是风扇转速：开 4~8 秒，看 RPM 有没有起来，最后恢复原状。
+function Invoke-FanTest {
+    Write-Host ''
+    Write-Host '===== 风扇满速实测（按转速验证，不看寄存器读回）=====' -ForegroundColor Cyan
+    $ac = Get-MifsByte -Func $FNUM['AC_TYPE']
+    $acName = switch ([int]$ac) { 0 { '电池供电' } 1 { 'Type-C 供电' } 2 { '圆口 DC 供电' } default { "原始值 $ac" } }
+    Write-Host ("当前供电   : {0}" -f $acName)
+
+    $base = @()
+    for ($i = 0; $i -lt 4; $i++) {
+        $f = Get-MifsFan
+        if ($f) { $base += [int]$f[0] }
+        Start-Sleep -Milliseconds 700
+    }
+    if ($base.Count -eq 0) { Write-Host '读不到风扇转速，无法验证（需要管理员）' -ForegroundColor Red; return }
+    $baseMax = ($base | Measure-Object -Maximum).Maximum
+    Write-Host ("基线转速   : {0} RPM（4 次采样取最大）" -f $baseMax)
+
+    $b = New-Object byte[] 2
+    $b[0] = 0      # 风扇组 0 = CPU/GPU
+    $b[1] = 1      # 状态 1 = 满速
+    Write-Host '已发送 风扇满速=开，采样 8 秒…' -ForegroundColor Yellow
+    Invoke-Mifs -Type $SET -Func $FNUM['MAX_FAN_SWITCH'] -SetPayload $b | Out-Null
+
+    $after = @()
+    for ($i = 0; $i -lt 8; $i++) {
+        $f = Get-MifsFan
+        if ($f) { $after += [int]$f[0] }
+        Start-Sleep -Milliseconds 1000
+    }
+    $afterMax = ($after | Measure-Object -Maximum).Maximum
+    $reg = Get-MifsByte -Func $FNUM['MAX_FAN_SWITCH']
+    Write-Host ("加速后峰值 : {0} RPM     寄存器读回: {1}" -f $afterMax, $reg)
+
+    $delta = $afterMax - $baseMax
+    Write-Host ''
+    if ($delta -ge 250) {
+        Write-Host ("✅ 风扇确实加速了（+{0} RPM）" -f $delta) -ForegroundColor Green
+        Write-Host '   结论：EC 只是不把状态写回寄存器（读回恒为 0），功能本身可用。' -ForegroundColor Green
+        Write-Host '   OpenMIFS 已改为按转速判定，风扇满速按钮可用。' -ForegroundColor Green
+    } else {
+        Write-Host ("❌ 转速没有明显变化（{0} RPM）—— 该状态下 EC 不执行风扇满速" -f $delta) -ForegroundColor Yellow
+        if ([int]$ac -eq 1) {
+            Write-Host '   当前是 Type-C(PD) 供电；上游驱动文档说该状态下满速被硬件禁用。' -ForegroundColor Yellow
+            Write-Host '   若本机没有圆口 DC 供电口，MIFS 这条路走不通，只能走 EC RAM（PawnIO 等），' -ForegroundColor Yellow
+            Write-Host '   见 docs/FAN-CONTROL.md。' -ForegroundColor Yellow
+        }
+    }
+
+    $b[1] = 0
+    Invoke-Mifs -Type $SET -Func $FNUM['MAX_FAN_SWITCH'] -SetPayload $b | Out-Null
+    Start-Sleep -Milliseconds 600
+    $f2 = Get-MifsFan
+    Write-Host ("已恢复 风扇满速=关{0}" -f $(if ($f2) { "（当前 $($f2[0]) RPM）" } else { '' })) -ForegroundColor Green
+    Write-MifsLog 'INFO ' ("fan test: 供电={0} 基线={1} 峰值={2} 差值={3} 寄存器读回={4}" -f $acName, $baseMax, $afterMax, $delta, $reg)
+    Write-Host ''
 }
 
 function Show-Log {
@@ -1325,6 +1386,12 @@ try {
             }
         }
         'log'    { Show-Log }
+        'fan'    {
+            switch ($Value) {
+                'test'  { Invoke-FanTest }
+                default { Invoke-FanTest }
+            }
+        }
     }
 }
 catch {
