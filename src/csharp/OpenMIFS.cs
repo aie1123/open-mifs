@@ -25,6 +25,7 @@ using System.Globalization;
 using System.IO;
 using System.Management;
 using Microsoft.Win32;
+using System.Runtime.InteropServices;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -36,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.3.2.0")]
-[assembly: AssemblyFileVersion("0.3.2.0")]
+[assembly: AssemblyVersion("0.3.3.0")]
+[assembly: AssemblyFileVersion("0.3.3.0")]
 
 namespace OpenMIFS
 {
@@ -199,6 +200,60 @@ namespace OpenMIFS
         }
 
         public static void Reset() { FanBoost = null; Save(); Log.Info("能力缓存已重置，下次点击将重新探测"); }
+    }
+
+    // ─────────────────────────────────────────────────────────── 用户设置
+    // 存 %LOCALAPPDATA%\OpenMIFS\settings.txt，key=value，删掉即恢复默认。
+    internal static class Settings
+    {
+        private static readonly Dictionary<string, string> Map = new Dictionary<string, string>();
+        private static bool _loaded;
+
+        private static string PathName { get { return Path.Combine(Log.Folder, "settings.txt"); } }
+
+        public static string Get(string key, string def)
+        {
+            Load();
+            string v;
+            return Map.TryGetValue(key, out v) ? v : def;
+        }
+
+        public static void Set(string key, string value)
+        {
+            Load();
+            Map[key] = value;
+            try
+            {
+                if (!Directory.Exists(Log.Folder)) Directory.CreateDirectory(Log.Folder);
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("# OpenMIFS 设置（key=value，删掉即恢复默认）");
+                foreach (KeyValuePair<string, string> kv in Map) sb.AppendLine(kv.Key + "=" + kv.Value);
+                File.WriteAllText(PathName, sb.ToString(), new UTF8Encoding(false));
+                Log.Info("设置已保存：" + key + "=" + value + " → " + PathName);
+            }
+            catch (Exception ex) { Log.Ex("写入设置失败", ex); }
+        }
+
+        private static void Load()
+        {
+            if (_loaded) return;
+            _loaded = true;
+            try
+            {
+                if (!File.Exists(PathName)) return;
+                string[] lines = File.ReadAllLines(PathName);
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string s = lines[i].Trim();
+                    if (s.Length == 0 || s.StartsWith("#")) continue;
+                    int eq = s.IndexOf('=');
+                    if (eq <= 0) continue;
+                    Map[s.Substring(0, eq).Trim()] = s.Substring(eq + 1).Trim();
+                }
+                Log.Info("已加载设置：" + PathName + "（" + Map.Count.ToString(CultureInfo.InvariantCulture) + " 项）");
+            }
+            catch (Exception ex) { Log.Ex("读取设置失败", ex); }
+        }
     }
 
     // ──────────────────────────────────────────────────────────── MIFS 调用层
@@ -418,6 +473,50 @@ namespace OpenMIFS
         public const string UtilityExe  = "BLDFnHotkeyUtility.exe";
         public const string UtilityName = "BLDFnHotkeyUtility";
         public const string InstallDir  = @"C:\Program Files\OSD";
+
+        // ── 官方 OSD 的悬浮窗探测 ────────────────────────────────────────
+        // BLDFnHotkeyUtility.exe 的提示窗是一个小的分层工具窗，
+        // 标题固定为 FloatingNativeWindow，显示时带 WS_VISIBLE。
+        // 用它判断"官方 OSD 此刻正在画" → 自带的提示让位，避免两条提示重叠。
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int maxCount);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left, Top, Right, Bottom; }
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        private static bool _foundVisible;
+
+        /// <summary>官方 OSD 的提示窗此刻是否可见（= 它正在显示提示）。</summary>
+        public static bool FloatingWindowVisible()
+        {
+            _foundVisible = false;
+            try { EnumWindows(new EnumWindowsProc(EnumProc), IntPtr.Zero); }
+            catch (Exception ex) { Log.Ex("枚举 OSD 悬浮窗失败", ex); }
+            return _foundVisible;
+        }
+
+        private static bool EnumProc(IntPtr hWnd, IntPtr lParam)
+        {
+            if (_foundVisible) return false;                 // 已找到，停止枚举
+            if (!IsWindowVisible(hWnd)) return true;
+            StringBuilder sb = new StringBuilder(128);
+            GetWindowTextW(hWnd, sb, sb.Capacity);
+            if (sb.ToString() != "FloatingNativeWindow") return true;
+            RECT r;
+            if (!GetWindowRect(hWnd, out r)) return true;
+            int w = r.Right - r.Left, h = r.Bottom - r.Top;
+            if (w <= 0 || h <= 0 || w > 800 || h > 800) return true;   // 尺寸也要对得上
+            _foundVisible = true;
+            return false;
+        }
 
         public sealed class State
         {
@@ -1036,7 +1135,11 @@ namespace OpenMIFS
         private readonly Button[] _btnKbd = new Button[4];
         private GroupBox _gbKbd;
         private readonly CheckBox _chkStartup = new CheckBox();
-        private readonly CheckBox _chkOsd = new CheckBox();
+        private readonly ComboBox _cmbOsdHint = new ComboBox();
+        private readonly System.Windows.Forms.Timer _hintTimer = new System.Windows.Forms.Timer();
+        private string _osdHintMode = "auto";
+        private string _pendingHint;
+        private bool _sensorBusy;
         private readonly Label _lblOsd = new Label();
         private readonly Button _btnOsdRestart = new Button();
         private readonly Button _btnOsdDiag = new Button();
@@ -1102,6 +1205,10 @@ namespace OpenMIFS
             _timer.Tick += delegate { if (_chkAuto.Checked) RefreshAll(); };
             _timer.Start();
 
+            _osdHintMode = Settings.Get("osd_hint", "auto");
+            _hintTimer.Interval = 350;   // 等官方 OSD 先画出来再决定要不要显示自带的
+            _hintTimer.Tick += delegate { _hintTimer.Stop(); FlushPendingHint(); };
+
             // 专门盯 Fn 键会改的那几个 EC 值：官方 OSD 失效时由我们自己弹提示。
             // 1.5 秒一轮，只读 4 个功能号，开销很小。
             _osdWatch.Interval = 1500;
@@ -1158,10 +1265,42 @@ namespace OpenMIFS
             else Restore();
         }
 
-        /// <summary>自带 OSD：屏幕上闪一条提示（官方 OSD 失效时的替代）。</summary>
+        /// <summary>自带屏幕提示的统一入口。
+        /// 模式：auto = 官方 OSD 正在画就让位（默认）/ always = 总是显示 / off = 关闭。
+        /// defer=true 用于外部（Fn 键）改动：等 350 ms 让官方 OSD 先画出来再判断，避免两条提示重叠。</summary>
+        public void OsdHint(string text, bool defer)
+        {
+            if (_osdHintMode == "off") return;
+            if (defer)
+            {
+                _pendingHint = text;
+                _hintTimer.Stop();
+                _hintTimer.Start();
+                return;
+            }
+            ShowHintIfAllowed(text);
+        }
+
+        /// <summary>兼容旧调用：立刻显示（内部按钮触发的动作）。</summary>
         public void ShowOsd(string text)
         {
-            if (!_chkOsd.Checked) return;
+            OsdHint(text, false);
+        }
+
+        private void FlushPendingHint()
+        {
+            string t = _pendingHint;
+            _pendingHint = null;
+            if (t != null) ShowHintIfAllowed(t);
+        }
+
+        private void ShowHintIfAllowed(string text)
+        {
+            if (_osdHintMode == "auto" && Osd.FloatingWindowVisible())
+            {
+                Log.Info("官方 OSD 正在显示，跳过自带提示：" + text);
+                return;
+            }
             if (_overlay == null) _overlay = new OsdOverlay();
             _overlay.ShowText(text);
         }
@@ -1187,7 +1326,7 @@ namespace OpenMIFS
         /// <summary>轮询 Fn 键会改的 EC 值，发现外部变化就弹自带 OSD。</summary>
         private void CheckOsdWatch()
         {
-            if (!_chkOsd.Checked) return;
+            if (_osdHintMode == "off") return;
             try
             {
                 int? m = Mifs.GetByte(Mifs.FnPerMode);
@@ -1196,26 +1335,26 @@ namespace OpenMIFS
                     if (_wPrimed && _wMode != m.Value)
                     {
                         Log.Info("检测到外部改动：性能模式 → " + ModeMap.Label(m.Value) + "（弹自带 OSD）");
-                        ShowOsd("性能模式 · " + ModeMap.Label(m.Value));
+                        OsdHint("性能模式 · " + ModeMap.Label(m.Value), true);
                     }
                     _wMode = m.Value;
                 }
                 int? f = Mifs.GetByte(Mifs.FnFnLock);
                 if (f.HasValue)
                 {
-                    if (_wPrimed && _wFn != f.Value) { Log.Info("检测到外部改动：Fn 锁 → " + f.Value); ShowOsd("Fn 锁 · " + (f.Value == 1 ? "开" : "关")); }
+                    if (_wPrimed && _wFn != f.Value) { Log.Info("检测到外部改动：Fn 锁 → " + f.Value); OsdHint("Fn 锁 · " + (f.Value == 1 ? "开" : "关"), true); }
                     _wFn = f.Value;
                 }
                 int? t = Mifs.GetByte(Mifs.FnTpLock);
                 if (t.HasValue)
                 {
-                    if (_wPrimed && _wTp != t.Value) { Log.Info("检测到外部改动：触控板锁 → " + t.Value); ShowOsd("触控板 · " + (t.Value == 1 ? "已锁定" : "正常")); }
+                    if (_wPrimed && _wTp != t.Value) { Log.Info("检测到外部改动：触控板锁 → " + t.Value); OsdHint("触控板 · " + (t.Value == 1 ? "已锁定" : "正常"), true); }
                     _wTp = t.Value;
                 }
                 int? k = Mifs.GetByte(Mifs.FnRgbBright);
                 if (k.HasValue)
                 {
-                    if (_wPrimed && _wKbd != k.Value) { Log.Info("检测到外部改动：键盘背光 → " + k.Value); ShowOsd("键盘背光 · 等级 " + k.Value); }
+                    if (_wPrimed && _wKbd != k.Value) { Log.Info("检测到外部改动：键盘背光 → " + k.Value); OsdHint("键盘背光 · 等级 " + k.Value, true); }
                     _wKbd = k.Value;
                 }
                 _wPrimed = true;
@@ -1331,17 +1470,22 @@ namespace OpenMIFS
             _chkStartup.Click += OnStartupClick;
             gOsd.Controls.Add(_chkStartup);
 
-            _chkOsd.Text = "操作时显示屏幕提示";
-            _chkOsd.Location = new Point(252, 22);
-            _chkOsd.Size = new Size(190, 22);
-            _chkOsd.Font = new Font("Microsoft YaHei UI", 9F);
-            _chkOsd.Checked = true;
-            _chkOsd.Click += delegate
-            {
-                Log.Info("自带 OSD 提示：" + (_chkOsd.Checked ? "开" : "关"));
-                if (_chkOsd.Checked) ShowOsd("OpenMIFS 屏幕提示：开");
-            };
-            gOsd.Controls.Add(_chkOsd);
+            Label lblHintMode = new Label();
+            lblHintMode.Text = "屏幕提示";
+            lblHintMode.Location = new Point(248, 25);
+            lblHintMode.Size = new Size(60, 18);
+            lblHintMode.Font = _fontUi8;
+            lblHintMode.AutoSize = false;
+            gOsd.Controls.Add(lblHintMode);
+
+            _cmbOsdHint.Location = new Point(308, 22);
+            _cmbOsdHint.Size = new Size(136, 22);
+            _cmbOsdHint.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cmbOsdHint.Font = _fontUi8;
+            _cmbOsdHint.Items.AddRange(new object[] { "自动（不重复）", "总是显示", "关闭" });
+            _cmbOsdHint.SelectedIndex = 0;
+            _cmbOsdHint.SelectedIndexChanged += OnOsdHintModeChanged;
+            gOsd.Controls.Add(_cmbOsdHint);
 
             _lblOsd.Location = new Point(12, 48);
             _lblOsd.Size = new Size(432, 20);
@@ -1595,47 +1739,65 @@ namespace OpenMIFS
         }
 
         // ────────────────────────────────────────────────────── 传感器
-        /// <summary>读取并渲染传感器（首页直接展示；窗口隐藏到托盘后跳过，省开销）。</summary>
+        /// <summary>读取并渲染传感器（首页直接展示；窗口隐藏到托盘后跳过，省开销）。
+        /// 读数放在线程池里做：首次读取要预热 PDH + 走 WMI，约 1~2 秒，
+        /// 放 UI 线程上会把窗口卡住，所以读→回到 UI 线程渲染。</summary>
         public void RefreshSensors()
         {
             if (!Visible) return;
+            if (_sensorBusy) return;
             if ((DateTime.Now - _lastSensorRefresh).TotalSeconds < 2) return;
             _lastSensorRefresh = DateTime.Now;
-            try
+            _sensorBusy = true;
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                DateTime t0 = DateTime.Now;
-                List<Reading> list = Sensors.ReadAll();
-                double ms = (DateTime.Now - t0).TotalMilliseconds;
-                if (ms > 400) Log.Warn("传感器：本轮读取耗时 " + ms.ToString("0", CultureInfo.InvariantCulture) + " ms（偏慢，可考虑降低刷新频率）");
-
-                // 面板上的固定阅读顺序：温度 → 功耗 → 频率 → 负载 …（按用户要求）
-                List<Reading> ordered = new List<Reading>();
-                for (int i = 0; i < SensorOrder.Length; i++)
-                    for (int j = 0; j < list.Count; j++)
-                        if (list[j].Name == SensorOrder[i]) { ordered.Add(list[j]); break; }
-                for (int j = 0; j < list.Count; j++) if (!ordered.Contains(list[j])) ordered.Add(list[j]);
-                list = ordered;
-
-                StringBuilder sb = new StringBuilder();
-                for (int i = 0; i < list.Count; i++)
+                string text = null;
+                string err = null;
+                string hint = null;
+                double ms = 0;
+                try
                 {
-                    sb.AppendLine(list[i].Name + " : " + list[i].Value);
-                    if (list[i].Note.Length > 0) sb.AppendLine("└ " + list[i].Note);
-                }
-                SetRows(_pnlSensorRows, _sensorOrder, _sensorRows, sb.ToString());
+                    DateTime t0 = DateTime.Now;
+                    List<Reading> list = Sensors.ReadAll();
+                    ms = (DateTime.Now - t0).TotalMilliseconds;
 
-                int ok = 0, fail = 0;
-                for (int i = 0; i < list.Count; i++) { if (list[i].Ok) ok++; else fail++; }
-                _lblSensorHint.Text = "可用 " + ok.ToString(CultureInfo.InvariantCulture)
-                    + " 项 · 未实现 " + fail.ToString(CultureInfo.InvariantCulture)
-                    + " 项 · " + DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture)
-                    + " · 只读（PDH + WMI + MIFS）";
-            }
-            catch (Exception ex)
-            {
-                Log.Ex("读取传感器失败", ex);
-                _lblSensorHint.Text = "读取失败：" + ex.Message + "（详见日志）";
-            }
+                    // 面板上的固定阅读顺序：温度 → 功耗 → 频率 → 负载 …（按用户要求）
+                    List<Reading> ordered = new List<Reading>();
+                    for (int i = 0; i < SensorOrder.Length; i++)
+                        for (int j = 0; j < list.Count; j++)
+                            if (list[j].Name == SensorOrder[i]) { ordered.Add(list[j]); break; }
+                    for (int j = 0; j < list.Count; j++) if (!ordered.Contains(list[j])) ordered.Add(list[j]);
+
+                    StringBuilder sb = new StringBuilder();
+                    int ok = 0, fail = 0;
+                    for (int i = 0; i < ordered.Count; i++)
+                    {
+                        sb.AppendLine(ordered[i].Name + " : " + ordered[i].Value);
+                        if (ordered[i].Note.Length > 0) sb.AppendLine("└ " + ordered[i].Note);
+                        if (ordered[i].Ok) ok++; else fail++;
+                    }
+                    text = sb.ToString();
+                    hint = "可用 " + ok.ToString(CultureInfo.InvariantCulture)
+                         + " 项 · 未实现 " + fail.ToString(CultureInfo.InvariantCulture)
+                         + " 项 · " + DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture)
+                         + " · 只读（PDH + WMI + MIFS）";
+                }
+                catch (Exception ex) { err = ex.Message; Log.Ex("读取传感器失败", ex); }
+
+                if (ms > 400) Log.Warn("传感器：本轮读取耗时 " + ms.ToString("0", CultureInfo.InvariantCulture) + " ms（后台线程，不卡界面）");
+
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        _sensorBusy = false;
+                        if (err != null) { _lblSensorHint.Text = "读取失败：" + err + "（详见日志）"; return; }
+                        SetRows(_pnlSensorRows, _sensorOrder, _sensorRows, text);
+                        _lblSensorHint.Text = hint;
+                    });
+                }
+                catch { _sensorBusy = false; }
+            });
         }
 
         private void OnSensorProbeClick(object sender, EventArgs e)
@@ -1663,6 +1825,16 @@ namespace OpenMIFS
             }
             catch (Exception ex) { Log.Ex("传感器探测失败", ex); Warn("探测失败：" + ex.Message); }
             finally { Cursor = Cursors.Default; }
+        }
+
+        private void OnOsdHintModeChanged(object sender, EventArgs e)
+        {
+            if (_suppress) return;
+            _osdHintMode = _cmbOsdHint.SelectedIndex == 1 ? "always" : (_cmbOsdHint.SelectedIndex == 2 ? "off" : "auto");
+            Settings.Set("osd_hint", _osdHintMode);
+            Log.Info("屏幕提示模式：" + _osdHintMode + "（" + _cmbOsdHint.Text + "）");
+            if (_osdHintMode != "off")
+                OsdHint("屏幕提示 · " + _cmbOsdHint.Text, false);
         }
 
         private void OnIntervalChanged(object sender, EventArgs e)
