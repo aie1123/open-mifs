@@ -310,24 +310,21 @@ namespace OpenMIFS
 
             // ── CPU
             float? pkg = _powerInstance == null ? (float?)null : Next("Energy Meter", "Power", _powerInstance);
-            if (pkg.HasValue)
-                list.Add(new Reading("CPU", "封装功耗", W(pkg.Value), true, "PDH Energy Meter / " + _powerInstance));
-            else
-                list.Add(new Reading("CPU", "封装功耗", "未实现", false, "本机没有 rapl_packageN_pkg 计数器"));
+            string pkgNote = _powerInstance == null ? "本机没有 rapl_packageN_pkg 计数器" : "PDH Energy Meter / " + _powerInstance;
 
             float? freq = Next("Processor Information", "Processor Frequency", "_Total");
             float? perf = Next("Processor Information", "% Processor Performance", "_Total");
             if (freq.HasValue && perf.HasValue)
-                list.Add(new Reading("CPU", "有效频率（估算）",
+                list.Add(new Reading("CPU", "CPU 频率",
                     string.Format(CultureInfo.InvariantCulture, "{0:0.00} GHz", freq.Value * perf.Value / 100.0 / 1000.0),
-                    true, string.Format(CultureInfo.InvariantCulture, "{0:0} MHz × {1:0.0}%", freq.Value, perf.Value)));
+                    true, string.Format(CultureInfo.InvariantCulture, "估算：{0:0} MHz × {1:0.0}%", freq.Value, perf.Value)));
             else
-                list.Add(new Reading("CPU", "有效频率", "未实现", false, "Processor Information 计数器不可用"));
+                list.Add(new Reading("CPU", "CPU 频率", "未实现", false, "Processor Information 计数器不可用"));
 
             float? load = Next("Processor Information", "% Processor Time", "_Total");
-            if (load.HasValue) list.Add(new Reading("CPU", "负载", string.Format(CultureInfo.InvariantCulture, "{0:0.0} %", load.Value), true, "% Processor Time"));
+            if (load.HasValue) list.Add(new Reading("CPU", "CPU 负载", string.Format(CultureInfo.InvariantCulture, "{0:0.0} %", load.Value), true, "PDH % Processor Time"));
 
-            // 每核 / 域功耗
+            // 每核 / 供电域 / 插槽：细节太多，塞进「CPU 功耗」那一行的鼠标提示，面板上不占行
             string[] em = Instances("Energy Meter");
             List<string> coreNames = new List<string>();
             for (int i = 0; i < em.Length; i++)
@@ -335,21 +332,18 @@ namespace OpenMIFS
             coreNames.Sort();
             if (coreNames.Count > 0)
             {
-                StringBuilder sb = new StringBuilder();
+                StringBuilder cs = new StringBuilder();
                 int shown = 0;
-                for (int i = 0; i < coreNames.Count && shown < 8; i++)
+                for (int i = 0; i < coreNames.Count; i++)
                 {
                     float? v = Next("Energy Meter", "Power", coreNames[i]);
                     if (!v.HasValue) continue;
-                    if (shown > 0) sb.Append(" / ");
-                    sb.Append(string.Format(CultureInfo.InvariantCulture, "{0:0.00}", v.Value / 1000.0));
+                    if (shown > 0) cs.Append(" / ");
+                    cs.Append(string.Format(CultureInfo.InvariantCulture, "{0:0.00}", v.Value / 1000.0));
                     shown++;
                 }
-                if (shown > 0)
-                    list.Add(new Reading("CPU", "核心功耗 W", sb.ToString(), true,
-                        coreNames.Count.ToString(CultureInfo.InvariantCulture) + " 个核域（PDH）"));
+                if (shown > 0) pkgNote += "；每核功耗 W " + cs.ToString();
             }
-
             string s1 = null, s2 = null;
             for (int i = 0; i < em.Length; i++)
             {
@@ -361,15 +355,17 @@ namespace OpenMIFS
             {
                 float? v1 = s1 == null ? (float?)null : Next("Energy Meter", "Power", s1);
                 float? v2 = s2 == null ? (float?)null : Next("Energy Meter", "Power", s2);
-                list.Add(new Reading("CPU", "VDDCR / SoC",
-                    (v1.HasValue ? W(v1.Value) : "—") + " / " + (v2.HasValue ? W(v2.Value) : "—"),
-                    v1.HasValue || v2.HasValue, "供电域功耗（PDH）"));
+                pkgNote += "；供电域 VDDCR " + (v1.HasValue ? W(v1.Value) : "—") + " / SoC " + (v2.HasValue ? W(v2.Value) : "—");
             }
             if (_socketInstance != null)
             {
                 float? sock = Next("Energy Meter", "Power", _socketInstance);
-                if (sock.HasValue) list.Add(new Reading("CPU", "插槽功耗", W(sock.Value), true, _socketInstance));
+                if (sock.HasValue) pkgNote += "；插槽 " + W(sock.Value);
             }
+            if (pkg.HasValue)
+                list.Add(new Reading("CPU", "CPU 功耗", W(pkg.Value), true, pkgNote));
+            else
+                list.Add(new Reading("CPU", "CPU 功耗", "未实现", false, pkgNote));
 
             // ── 温度（ACPI 热区）
             if (zone != null)
@@ -380,18 +376,17 @@ namespace OpenMIFS
                 if (t.HasValue)
                 {
                     string v = string.Format(CultureInfo.InvariantCulture, "{0:0.0} ℃", t.Value - 273.15f);
-                    string note = "ACPI 热区 " + zone;
+                    string note = "ACPI 热区 " + zone + "（EC 上报的封装邻区，不是 die 温度）";
                     if (hp.HasValue) note += "，高精度 " + (hp.Value / 10.0 - 273.15).ToString("0.0", CultureInfo.InvariantCulture) + " ℃";
                     if (th.HasValue) note += "，降频原因 " + th.Value.ToString("0", CultureInfo.InvariantCulture) + (th.Value == 0 ? "（正常）" : "（正在降频！）");
-                    list.Add(new Reading("温度", "热区 / 封装邻区", v, true, note));
+                    list.Add(new Reading("温度", "CPU 温度", v, true, note));
                 }
             }
             else
             {
-                list.Add(new Reading("温度", "热区 / 封装邻区", "未实现", false, "本机没有 Thermal Zone Information 计数器"));
+                list.Add(new Reading("温度", "CPU 温度", "未实现", false, "本机没有 Thermal Zone Information 计数器"));
             }
-            list.Add(new Reading("温度", "CPU die 温度", "不支持", false, "AMD SMU 需要内核驱动，本项目不做（见 docs/SENSORS.md）"));
-
+            // CPU die 温度写进日志与探测报告即可，面板上不放这一行（它恒为"不支持"）
             // ── GPU
             List<KeyValuePair<string, double>> gpu = PerfFormatted(
                 "Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine", "UtilizationPercentage");
@@ -414,13 +409,13 @@ namespace OpenMIFS
                 double best = 0;
                 foreach (KeyValuePair<string, double> kv in byType)
                     if (kv.Value > best) { best = kv.Value; busiest = kv.Key; }
-                list.Add(new Reading("GPU", "利用率",
+                list.Add(new Reading("GPU", "GPU 利用率",
                     string.Format(CultureInfo.InvariantCulture, "{0} {1:0.0} %（合计 {2:0.0} %）", busiest, best, total),
                     true, "WMI GPU Engine（Windows 原生）"));
             }
             else
             {
-                list.Add(new Reading("GPU", "利用率", "未实现", false, "GPU Engine 计数器不可用"));
+                list.Add(new Reading("GPU", "GPU 利用率", "未实现", false, "GPU Engine 计数器不可用"));
             }
 
             List<KeyValuePair<string, double>> gm = PerfFormatted(
@@ -428,7 +423,7 @@ namespace OpenMIFS
             double memSum = 0;
             for (int i = 0; i < gm.Count; i++) if (gm[i].Value > 0) memSum += gm[i].Value;
             if (gm.Count > 0)
-                list.Add(new Reading("GPU", "专用显存占用", string.Format(CultureInfo.InvariantCulture, "{0:0} MB", memSum / 1048576.0), true, "WMI GPU Adapter Memory"));
+                list.Add(new Reading("GPU", "GPU 显存", string.Format(CultureInfo.InvariantCulture, "{0:0} MB", memSum / 1048576.0), true, "WMI GPU Adapter Memory"));
 
             AdlInit();
             if (_adlOk)
@@ -455,23 +450,23 @@ namespace OpenMIFS
                     }
                 }
                 if (haveTemp)
-                    list.Add(new Reading("GPU", "温度", string.Format(CultureInfo.InvariantCulture, "{0:0.0} ℃", tempC), true, "ADL（" + _adlNote + "）"));
+                    list.Add(new Reading("GPU", "GPU 温度", string.Format(CultureInfo.InvariantCulture, "{0:0.0} ℃", tempC), true, "ADL（" + _adlNote + "）"));
 
                 ADLPMActivity a = new ADLPMActivity();
                 a.iSize = Marshal.SizeOf(typeof(ADLPMActivity));
                 if (Adl.ADL_Overdrive5_CurrentActivity_Get(_adlAdapter, out a) == 0)
                 {
                     if (a.iEngineClock > 0)
-                        list.Add(new Reading("GPU", "核心频率", string.Format(CultureInfo.InvariantCulture, "{0:0} MHz", a.iEngineClock / 100.0), true, "ADL Overdrive5"));
+                        list.Add(new Reading("GPU", "GPU 频率", string.Format(CultureInfo.InvariantCulture, "{0:0} MHz", a.iEngineClock / 100.0), true, "ADL Overdrive5"));
                     if (a.iMemoryClock > 0)
-                        list.Add(new Reading("GPU", "显存频率", string.Format(CultureInfo.InvariantCulture, "{0:0} MHz", a.iMemoryClock / 100.0), true, "ADL Overdrive5"));
+                        list.Add(new Reading("GPU", "GPU 频率(显存)", string.Format(CultureInfo.InvariantCulture, "{0:0} MHz", a.iMemoryClock / 100.0), true, "ADL Overdrive5"));
                     if (a.iActivityPercent > 0)
-                        list.Add(new Reading("GPU", "活动度", string.Format(CultureInfo.InvariantCulture, "{0} %", a.iActivityPercent), true, "ADL Overdrive5"));
+                        list.Add(new Reading("GPU", "GPU 活动度", string.Format(CultureInfo.InvariantCulture, "{0} %", a.iActivityPercent), true, "ADL Overdrive5"));
                 }
             }
             else
             {
-                list.Add(new Reading("GPU", "温度 / 频率", "未实现", false, _adlNote));
+                list.Add(new Reading("GPU", "GPU 温度", "未实现", false, _adlNote));
             }
 
             // ── 内存
@@ -501,7 +496,7 @@ namespace OpenMIFS
                 if (modules > 0)
                 {
                     _memTypeCache = MemType(smbios);
-                    list.Add(new Reading("内存", "容量 / 规格",
+                    list.Add(new Reading("内存", "内存规格",
                         string.Format(CultureInfo.InvariantCulture, "{0:0.0} GB  {1}×{2:0} GB {3}{4}",
                             totalBytes / 1073741824.0, modules, totalBytes / 1073741824.0 / modules, _memTypeCache,
                             speed > 0 ? "-" + speed.ToString(CultureInfo.InvariantCulture) : ""),
@@ -511,7 +506,7 @@ namespace OpenMIFS
                 {
                     double usedGb = (totalKb - freeKb) / 1048576.0;
                     double totalGb = totalKb / 1048576.0;
-                    list.Add(new Reading("内存", "占用",
+                    list.Add(new Reading("内存", "内存占用",
                         string.Format(CultureInfo.InvariantCulture, "{0:0.0} / {1:0.0} GB（{2:0.0} %）", usedGb, totalGb, usedGb / totalGb * 100.0),
                         true, "WMI Win32_OperatingSystem"));
                 }
@@ -557,41 +552,52 @@ namespace OpenMIFS
                     string note = "WMI Storage"
                         + (bus.Length > 0 ? " / " + bus : "")
                         + (health.Length > 0 ? " / " + health : "");
-                    string value = string.Format(CultureInfo.InvariantCulture, "{0:0} GB", gb);
 
-                    ManagementBaseObject c;
-                    if (rel.TryGetValue(did, out c))
+                    ManagementBaseObject c2;
+                    // 面板上拆成两行：磁盘（型号/容量）与 磁盘温度（温度/磨损/通电）
+                    string tempText = "未实现";
+                    string tempNote = note;
+                    if (rel.TryGetValue(did, out c2))
                     {
-                        int temp = Int(c["Temperature"]);
-                        int wear = Int(c["Wear"]);
-                        long hours = Long(c["PowerOnHours"]);
-                        value += "  " + (temp > 0 ? temp.ToString(CultureInfo.InvariantCulture) + " ℃" : "温度未知")
-                               + "  磨损 " + wear.ToString(CultureInfo.InvariantCulture)
-                               + (hours > 0 ? "  通电 " + hours.ToString(CultureInfo.InvariantCulture) + " h" : "");
-                        note += " + StorageReliabilityCounter";
+                        int temp = Int(c2["Temperature"]);
+                        int wear = Int(c2["Wear"]);
+                        long hours = Long(c2["PowerOnHours"]);
+                        tempText = (temp > 0 ? temp.ToString(CultureInfo.InvariantCulture) + " ℃" : "未知")
+                                 + "  磨损 " + wear.ToString(CultureInfo.InvariantCulture)
+                                 + (hours > 0 ? "  通电 " + hours.ToString(CultureInfo.InvariantCulture) + " h" : "");
+                        tempNote = note + " + StorageReliabilityCounter";
                     }
                     else if (relError.Length > 0)
                     {
-                        note += "（温度需管理员：" + relError + "）";
+                        tempText = "需要管理员";
+                        tempNote = note + "（" + relError + "）";
                     }
                     else
                     {
-                        note += "（该盘没有可靠性计数器）";
+                        tempNote = note + "（该盘没有可靠性计数器）";
                     }
 
-                    list.Add(new Reading("存储", name + (media.Length > 0 ? "（" + media + "）" : ""), value, true, note));
+                    list.Add(new Reading("存储", "磁盘", name + (media.Length > 0 ? "（" + media + "）" : "")
+                        + "  " + string.Format(CultureInfo.InvariantCulture, "{0:0} GB", gb), true, note + "（容量与型号）"));
+                    list.Add(new Reading("存储", "磁盘温度", tempText, !tempText.StartsWith("需要"), tempNote));
                 }
             }
             catch (Exception ex) { Log.Ex("传感器：读磁盘失败", ex); }
 
-            // ── 风扇（MIFS）
+            // ── 风扇（MIFS）：拆成两行，方便一眼看
             int[] fans = Mifs.GetFans();
             if (fans != null)
-                list.Add(new Reading("风扇 / 电池", "风扇",
-                    string.Format(CultureInfo.InvariantCulture, "{0} / {1}{2} RPM", fans[0], fans[1], fans[2] > 0 ? " / " + fans[2] : ""),
-                    true, "MIFS fn=13"));
+            {
+                list.Add(new Reading("风扇 / 电池", "风扇1", string.Format(CultureInfo.InvariantCulture, "{0} RPM", fans[0]), true, "MIFS fn=13"));
+                list.Add(new Reading("风扇 / 电池", "风扇2", string.Format(CultureInfo.InvariantCulture, "{0} RPM", fans[1]), true, "MIFS fn=13"));
+                if (fans[2] > 0)
+                    list.Add(new Reading("风扇 / 电池", "风扇3", string.Format(CultureInfo.InvariantCulture, "{0} RPM", fans[2]), true, "MIFS fn=13"));
+            }
             else
-                list.Add(new Reading("风扇 / 电池", "风扇", "未实现", false, "MIFS 不可用（需要管理员）"));
+            {
+                list.Add(new Reading("风扇 / 电池", "风扇1", "未实现", false, "MIFS 不可用（需要管理员）"));
+                list.Add(new Reading("风扇 / 电池", "风扇2", "未实现", false, "MIFS 不可用（需要管理员）"));
+            }
 
             // ── 电池
             try
@@ -616,12 +622,13 @@ namespace OpenMIFS
                 if (charge.HasValue)
                 {
                     string ac = status.HasValue ? (status.Value == 2 ? "外接电源" : "电池供电") : "";
-                    string v = charge.Value.ToString(CultureInfo.InvariantCulture) + " %" + (ac.Length > 0 ? "  " + ac : "");
+                    string v = charge.Value.ToString(CultureInfo.InvariantCulture) + " %";
                     string note = "WMI Win32_Battery";
+                    if (ac.Length > 0) note = ac + " · " + note;
                     if (design > 0 && full > 0)
                     {
-                        v += string.Format(CultureInfo.InvariantCulture, "  健康 {0:0.0} %（{1}/{2} mWh）", full * 100.0 / design, full, design);
-                        note += " + root\\wmi 电池容量";
+                        v += string.Format(CultureInfo.InvariantCulture, "  ·  健康 {0:0.0} %", full * 100.0 / design);
+                        note += " · 满充 " + full.ToString(CultureInfo.InvariantCulture) + " mWh / 设计 " + design.ToString(CultureInfo.InvariantCulture) + " mWh";
                     }
                     list.Add(new Reading("风扇 / 电池", "电池", v, true, note));
                 }

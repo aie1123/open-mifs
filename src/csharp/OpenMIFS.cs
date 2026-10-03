@@ -36,8 +36,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.3.1.0")]
-[assembly: AssemblyFileVersion("0.3.1.0")]
+[assembly: AssemblyVersion("0.3.2.0")]
+[assembly: AssemblyFileVersion("0.3.2.0")]
 
 namespace OpenMIFS
 {
@@ -1044,14 +1044,15 @@ namespace OpenMIFS
         private readonly Button _btnRecap = new Button();
         private readonly CheckBox _chkDpi = new CheckBox();
         private readonly Label _lblDpi = new Label();
-        private readonly TextBox _txtSensors = new TextBox();
+        private readonly Panel _pnlStatusRows = new Panel();
+        private readonly Panel _pnlSensorRows = new Panel();
+        private GroupBox _gbStatus;
         private readonly Panel _pnlSensorBar = new Panel();
         private readonly Button _btnSensorProbe = new Button();
         private readonly Label _lblResizeHint = new Label();
         private GroupBox _gbSensors;
         private readonly Label _lblSensorHint = new Label();
         private DateTime _lastSensorRefresh = DateTime.MinValue;
-        private readonly TextBox _txtStatus = new TextBox();
         private readonly CheckBox _chkAuto = new CheckBox();
         private readonly ComboBox _cmbInterval = new ComboBox();
         private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
@@ -1086,7 +1087,7 @@ namespace OpenMIFS
         public MainForm()
         {
             Text = "OpenMIFS — 同方 MIFS 控制台";
-            ClientSize = new Size(940, 660);
+            ClientSize = new Size(940, 740);
             MinimumSize = new Size(700, 560);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.Sizable;   // 可拖动缩放：右列数据区跟着窗口变大
@@ -1393,24 +1394,7 @@ namespace OpenMIFS
             _lblDpi.AutoSize = false;
             gOsd.Controls.Add(_lblDpi);
 
-            // ── 右列：状态 + 传感器，直接摆在首页，随窗口缩放
-            _txtStatus.Multiline = true;
-            _txtStatus.ReadOnly = true;
-            _txtStatus.ScrollBars = ScrollBars.Vertical;
-            _txtStatus.WordWrap = false;
-            _txtStatus.Font = new Font("Consolas", 9F);
-            _txtStatus.Dock = DockStyle.Fill;
-            _txtStatus.BackColor = Color.FromArgb(250, 250, 250);
-
-            _txtSensors.Multiline = true;
-            _txtSensors.ReadOnly = true;
-            _txtSensors.ScrollBars = ScrollBars.Vertical;
-            _txtSensors.WordWrap = false;
-            _txtSensors.Font = new Font("Consolas", 9F);
-            _txtSensors.Dock = DockStyle.Fill;
-            _txtSensors.BackColor = Color.FromArgb(250, 250, 250);
-            _txtSensors.Text = "正在读取传感器（只读，不需要额外驱动）…";
-
+            // ── 右列：状态 + 传感器，直接摆在首页，键值行显示，随窗口缩放
             _pnlSensorBar.Dock = DockStyle.Bottom;
             _pnlSensorBar.Height = 34;
             _btnSensorProbe.Text = "探测数据源";
@@ -1424,28 +1408,35 @@ namespace OpenMIFS
             _lblSensorHint.Size = new Size(360, 18);
             _lblSensorHint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             _lblSensorHint.Font = _fontUi8;
-            _lblSensorHint.Text = "只读：PDH + WMI + MIFS，不加载任何驱动";
+            _lblSensorHint.Text = "正在读取…";
             _lblSensorHint.AutoSize = false;
             _pnlSensorBar.Controls.Add(_lblSensorHint);
 
             int rightW = ClientSize.Width - RightColX - RightColGap;
 
-            GroupBox gStatus = new GroupBox();
-            gStatus.Text = "状态";
-            gStatus.Font = _fontUi8;
-            gStatus.Location = new Point(RightColX, 58);
-            gStatus.Size = new Size(rightW, 168);
-            gStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            gStatus.Controls.Add(_txtStatus);
-            Controls.Add(gStatus);
+            _gbStatus = new GroupBox();
+            _gbStatus.Text = "状态";
+            _gbStatus.Font = _fontUi8;
+            _gbStatus.Location = new Point(RightColX, 58);
+            _gbStatus.Size = new Size(rightW, 242);
+            _gbStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _pnlStatusRows.Location = new Point(8, 18);
+            _pnlStatusRows.Size = new Size(rightW - 16, 216);
+            _pnlStatusRows.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _gbStatus.Controls.Add(_pnlStatusRows);
+            Controls.Add(_gbStatus);
 
             _gbSensors = new GroupBox();
-            _gbSensors.Text = "传感器（CPU 功耗 / 温度 / GPU / 内存 / 磁盘 / 风扇 / 电池）";
+            _gbSensors.Text = "传感器（只读 · 零驱动）";
             _gbSensors.Font = _fontUi8;
-            _gbSensors.Location = new Point(RightColX, 234);
-            _gbSensors.Size = new Size(rightW, ClientSize.Height - 234 - 52);
+            _gbSensors.Location = new Point(RightColX, 308);
+            _gbSensors.Size = new Size(rightW, ClientSize.Height - 308 - 52);
             _gbSensors.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            _gbSensors.Controls.Add(_txtSensors);
+            _pnlSensorRows.AutoScroll = true;
+            _pnlSensorRows.Location = new Point(8, 18);
+            _pnlSensorRows.Size = new Size(rightW - 16, _gbSensors.Height - 56);
+            _pnlSensorRows.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            _gbSensors.Controls.Add(_pnlSensorRows);
             _gbSensors.Controls.Add(_pnlSensorBar);
             Controls.Add(_gbSensors);
 
@@ -1487,8 +1478,124 @@ namespace OpenMIFS
             Controls.Add(_lblResizeHint);
         }
 
+        // ────────────────────────────────────────────────────── 数据行渲染
+        private sealed class KvRow
+        {
+            public Label Key;
+            public Label Val;
+        }
+
+        private const int RowH = 23;
+        private static readonly string[] SensorOrder = new string[]
+        {
+            "CPU 温度", "CPU 功耗", "CPU 频率", "CPU 负载",
+            "GPU 利用率", "GPU 显存", "GPU 温度", "GPU 频率",
+            "内存占用", "内存规格", "磁盘温度", "磁盘",
+            "风扇1", "风扇2", "风扇3", "电池"
+        };
+        private readonly List<string> _statusOrder = new List<string>();
+        private readonly Dictionary<string, KvRow> _statusRows = new Dictionary<string, KvRow>();
+        private readonly List<string> _sensorOrder = new List<string>();
+        private readonly Dictionary<string, KvRow> _sensorRows = new Dictionary<string, KvRow>();
+        private readonly ToolTip _tips = new ToolTip();
+
+        /// <summary>按需创建一行（灰色小标签 + 加粗数值）。</summary>
+        private KvRow EnsureRow(Panel host, List<string> order, Dictionary<string, KvRow> map, string key)
+        {
+            KvRow row;
+            if (map.TryGetValue(key, out row)) return row;
+            int y = order.Count * RowH;
+            Label k = new Label();
+            k.Text = key;
+            k.Location = new Point(10, y + 2);
+            k.Size = new Size(92, 20);
+            k.Font = _fontUi;
+            k.ForeColor = Color.FromArgb(96, 96, 102);
+            k.TextAlign = ContentAlignment.MiddleLeft;
+            k.AutoSize = false;
+            Label v = new Label();
+            v.Text = "—";
+            v.Location = new Point(104, y);
+            v.Size = new Size(host.Width - 112, 24);
+            v.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
+            v.TextAlign = ContentAlignment.MiddleLeft;
+            v.AutoSize = false;
+            v.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            host.Controls.Add(k);
+            host.Controls.Add(v);
+            row = new KvRow();
+            row.Key = k;
+            row.Val = v;
+            map[key] = row;
+            order.Add(key);
+            host.Height = 6 + order.Count * RowH;
+            return row;
+        }
+
+        /// <summary>单独设置一行（不存在就创建）。</summary>
+        private void SetRow(Panel host, List<string> order, Dictionary<string, KvRow> map, string key, string value)
+        {
+            KvRow r = EnsureRow(host, order, map, key);
+            r.Key.Text = key;
+            r.Val.Text = value;
+            r.Val.ForeColor = Color.FromArgb(24, 24, 28);
+        }
+
+        /// <summary>把「名称 : 值」形式的多行文本渲染成一排排键值标签（不再用文本框）。
+        /// "└" 开头的说明行不进面板，挂到该行的鼠标提示上；"== xx ==" 分组标题只看不显示。</summary>
+        private void RenderKeyValues(Panel host, List<string> order, Dictionary<string, KvRow> map, string text)
+        {
+            string[] lines = text.Replace("\r\n", "\n").Split('\n');
+            Dictionary<string, bool> seen = new Dictionary<string, bool>();
+            string lastKey = "";
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string raw = lines[i];
+                string t = raw.Trim();
+                if (t.Length == 0) continue;
+                if (t.StartsWith("==")) continue;                    // 分组标题
+                if (t.StartsWith("└"))                               // 数据源说明 → 挂到上一行的提示
+                {
+                    KvRow prev;
+                    if (lastKey.Length > 0 && map.TryGetValue(lastKey, out prev))
+                        _tips.SetToolTip(prev.Val, t.Substring(1).Trim());
+                    continue;
+                }
+                int c = raw.IndexOf(':');
+                if (c <= 0) continue;
+                string key = raw.Substring(0, c).Trim();
+                string val = raw.Substring(c + 1).Trim();
+                if (key.Length == 0) continue;
+                lastKey = key;
+
+                KvRow row = EnsureRow(host, order, map, key);
+                row.Key.Text = key;
+                row.Val.Text = val;
+                // 未实现/不支持的值用灰色，一眼能分辨
+                bool dim = val.StartsWith("未实现") || val.StartsWith("不支持") || val.StartsWith("需要管理员")
+                        || val == "—" || val == "未知";
+                row.Val.ForeColor = dim ? Color.FromArgb(140, 140, 145) : Color.FromArgb(24, 24, 28);
+                seen[key] = true;
+            }
+
+            // 本轮没出现过的行显示为 —
+            for (int i = 0; i < order.Count; i++)
+            {
+                if (seen.ContainsKey(order[i])) continue;
+                KvRow r = map[order[i]];
+                r.Val.Text = "—";
+                r.Val.ForeColor = Color.FromArgb(140, 140, 145);
+            }
+        }
+
+        private void SetRows(Panel host, List<string> order, Dictionary<string, KvRow> map, string text)
+        {
+            RenderKeyValues(host, order, map, text);
+        }
+
         // ────────────────────────────────────────────────────── 传感器
-        /// <summary>读取并渲染传感器面板（首页直接展示；窗口最小化到托盘后跳过，省开销）。</summary>
+        /// <summary>读取并渲染传感器（首页直接展示；窗口隐藏到托盘后跳过，省开销）。</summary>
         public void RefreshSensors()
         {
             if (!Visible) return;
@@ -1500,17 +1607,34 @@ namespace OpenMIFS
                 List<Reading> list = Sensors.ReadAll();
                 double ms = (DateTime.Now - t0).TotalMilliseconds;
                 if (ms > 400) Log.Warn("传感器：本轮读取耗时 " + ms.ToString("0", CultureInfo.InvariantCulture) + " ms（偏慢，可考虑降低刷新频率）");
-                _txtSensors.Text = Sensors.Render(list);
+
+                // 面板上的固定阅读顺序：温度 → 功耗 → 频率 → 负载 …（按用户要求）
+                List<Reading> ordered = new List<Reading>();
+                for (int i = 0; i < SensorOrder.Length; i++)
+                    for (int j = 0; j < list.Count; j++)
+                        if (list[j].Name == SensorOrder[i]) { ordered.Add(list[j]); break; }
+                for (int j = 0; j < list.Count; j++) if (!ordered.Contains(list[j])) ordered.Add(list[j]);
+                list = ordered;
+
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < list.Count; i++)
+                {
+                    sb.AppendLine(list[i].Name + " : " + list[i].Value);
+                    if (list[i].Note.Length > 0) sb.AppendLine("└ " + list[i].Note);
+                }
+                SetRows(_pnlSensorRows, _sensorOrder, _sensorRows, sb.ToString());
+
                 int ok = 0, fail = 0;
                 for (int i = 0; i < list.Count; i++) { if (list[i].Ok) ok++; else fail++; }
                 _lblSensorHint.Text = "可用 " + ok.ToString(CultureInfo.InvariantCulture)
-                    + " 项 / 未实现 " + fail.ToString(CultureInfo.InvariantCulture)
-                    + " 项 · 只读（PDH + WMI + MIFS）";
+                    + " 项 · 未实现 " + fail.ToString(CultureInfo.InvariantCulture)
+                    + " 项 · " + DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture)
+                    + " · 只读（PDH + WMI + MIFS）";
             }
             catch (Exception ex)
             {
                 Log.Ex("读取传感器失败", ex);
-                _txtSensors.Text = "读取失败：" + ex.Message + Environment.NewLine + "详见日志 " + Log.FilePath;
+                _lblSensorHint.Text = "读取失败：" + ex.Message + "（详见日志）";
             }
         }
 
@@ -1520,7 +1644,6 @@ namespace OpenMIFS
             try
             {
                 string text = Sensors.Probe();
-                _txtSensors.Text = text;
                 string file = Path.Combine(Log.Folder, "sensors-probe.txt");
                 try
                 {
@@ -1529,6 +1652,14 @@ namespace OpenMIFS
                     Log.Info("传感器探测结果已写入 " + file);
                 }
                 catch (Exception ex2) { Log.Ex("写入传感器探测结果失败", ex2); }
+                RefreshSensors();
+                if (MessageBox.Show(this,
+                        "探测完成。本机可用的通道已生效，完整报告（含计数器集、实例、单位、判据）写在："
+                        + Environment.NewLine + file + Environment.NewLine + Environment.NewLine + "现在打开看吗？",
+                        "探测数据源", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                {
+                    try { Process.Start("notepad.exe", "\"" + file + "\""); } catch { }
+                }
             }
             catch (Exception ex) { Log.Ex("传感器探测失败", ex); Warn("探测失败：" + ex.Message); }
             finally { Cursor = Cursors.Default; }
@@ -1749,12 +1880,17 @@ namespace OpenMIFS
             try
             {
                 Log.Info("开始 OSD 诊断");
+                Osd.State st = Osd.Query();
                 string text = Osd.Diagnose();
-                _txtStatus.Text = text;   // 诊断结果直接显示在首页右侧的「状态」框里
+                string file = Path.Combine(Log.Folder, "osd-diagnose.txt");
+                // 首页不再放文本转储：只把结论塞进状态行，完整报告写文件
+                SetRow(_pnlStatusRows, _statusOrder, _statusRows, "OSD 诊断", Osd.Healthy(st) ? "服务与进程正常" : "异常，见报告");
                 MessageBox.Show(this,
-                    "诊断完成，已写入：\r\n" + Path.Combine(Log.Folder, "osd-diagnose.txt") +
-                    "\r\n\r\n内容已同时显示在下方状态面板。",
+                    "诊断完成。" + Environment.NewLine + Environment.NewLine
+                    + "服务：" + st.ServiceState + "    界面进程：" + st.UtilityCount + " 个" + Environment.NewLine
+                    + "完整证据（事件日志、心跳时间范围、显示环境、系统 DPI）已写入：" + Environment.NewLine + file,
                     "诊断 OSD", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                try { Process.Start("notepad.exe", "\"" + file + "\""); } catch { }
             }
             catch (Exception ex) { Log.Ex("OSD 诊断失败", ex); Warn("OSD 诊断失败：" + ex.Message); }
             finally { Cursor = Cursors.Default; }
@@ -1973,16 +2109,13 @@ namespace OpenMIFS
                 sb.AppendLine("供电         : " + t);
             }
 
-            // ── CPU 温度 / 功率（本机恒为 0 = 未实现）
+            // ── MIFS 的 CPU 温度/功率（本机恒为 0 = 未实现）
+            // 面板上不再单列这两行（右侧传感器区已经有 CPU 温度/功耗），只把它们计入顶部"未实现"清单
             int? ct = Mifs.GetByte(Mifs.FnCpuTemp);
-            bool ctOk = ct.HasValue && ct.Value > 0;
-            sb.AppendLine("CPU 温度     : " + (ctOk ? ct.Value.ToString(CultureInfo.InvariantCulture) + " ℃" : "未实现"));
-            if (!ctOk) missing.Add("CPU 温度");
+            if (!(ct.HasValue && ct.Value > 0)) missing.Add("MIFS CPU 温度");
 
             int? cp = Mifs.GetByte(Mifs.FnCpuPower);
-            bool cpOk = cp.HasValue && cp.Value > 0;
-            sb.AppendLine("CPU 功率     : " + (cpOk ? cp.Value.ToString(CultureInfo.InvariantCulture) + " W" : "未实现"));
-            if (!cpOk) missing.Add("CPU 功率");
+            if (!(cp.HasValue && cp.Value > 0)) missing.Add("MIFS CPU 功率");
 
             // ── OSD
             RefreshOsdState(false);
@@ -2016,11 +2149,8 @@ namespace OpenMIFS
                 }
             }
 
-            sb.AppendLine();
-            sb.AppendLine("日志文件     : " + Log.FilePath);
-            sb.AppendLine("提示：MIFS 接口不提供电池充电阈值，无法用软件限制充电到 80%。");
-            sb.AppendLine("最后刷新     : " + DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture));
-            _txtStatus.Text = sb.ToString();
+
+            SetRows(_pnlStatusRows, _statusOrder, _statusRows, sb.ToString());
 
             _suppress = false;
             if (!_firstRefreshDone)
