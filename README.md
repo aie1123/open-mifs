@@ -11,8 +11,9 @@
 OpenMIFS 直接调用这个接口 —— 不安装任何官方组件、不加载任何驱动、不需要第三方运行库。
 
 ```
-OpenMIFS.exe        ← 下载即用，单文件 80 KB，常驻任务栏通知区域
+OpenMIFS.exe        ← 下载即用，单文件 109 KB，常驻任务栏通知区域
 OpenMIFS.exe --diagnose   ← 无界面采集 OSD 诊断证据（排障用）
+OpenMIFS.exe --sensors    ← 无界面传感器探测，逐项报告本机可用通道
 mifs-gui.cmd        ← 从源码直接跑图形界面
 mifs.cmd status     ← 从源码跑命令行版
 ```
@@ -50,6 +51,7 @@ mifs.cmd status     ← 从源码跑命令行版
 | 风扇满速 | 一键强冷（机型支持时） |
 | 启动与 OSD | 开机自启开关、OSD 状态、重启 OSD、诊断 OSD、重测功能 |
 | 状态面板 | 供电状态、CPU 温度/功率、OSD 状态、日志路径 |
+| **传感器** | CPU 功耗/频率/负载、热区温度、GPU 利用率/显存、内存、磁盘、风扇、电池（只读，零驱动） |
 | 自动刷新 | 可调 2 / 3 / 5 / 10 秒 |
 
 exe 版本额外具备：
@@ -59,6 +61,8 @@ exe 版本额外具备：
 - **托盘提示**：鼠标悬停显示当前模式与风扇转速
 - **诊断日志**：每个动作写一行到 `%LOCALAPPDATA%\OpenMIFS\openmifs.log`
 - **自带屏幕提示（替代官方 OSD）**：检测到 Fn 键改动了 EC 值，就在屏幕下方弹一条提示
+- **传感器面板**：CPU 封装功耗（AMD RAPL）、热区温度、GPU 利用率、内存/磁盘/风扇/电池 ——
+  **全部免驱动**，只读 Windows 自带的性能计数器与 WMI
 - **开机自启**：注册计划任务（`/RL HIGHEST`），登录时静默以管理员身份启动，**不会弹 UAC**
 - **能力探测**：写不进去的功能（例如本机的风扇满速）会被实测判定并**永久置灰**，不假装能用
 - **单实例保护**：重复启动会提示，不会重复占用资源
@@ -83,10 +87,12 @@ exe 版本额外具备：
 .\src\mifs.ps1 osd diagnose         # OSD 诊断证据
 .\src\mifs.ps1 startup on           # 开机自启：on / off / status
 .\src\mifs.ps1 log                  # 打印日志路径 + 最后 20 行
+.\src\mifs.ps1 sensors              # 传感器实时读数（只读）
+.\src\mifs.ps1 sensors probe        # 探测本机有哪些传感器通道可用（只读）
 ```
 
-`status` / `probe` / `test` / `scan` / `raw` / `osd status` / `osd diagnose` / `startup status` / `log`
-只发 GET，纯读，不改任何状态。
+`status` / `probe` / `test` / `scan` / `raw` / `osd status` / `osd diagnose` / `osd dpi` /
+`startup status` / `log` / `sensors` 只发 GET 或只读计数器，不改任何状态。
 `mode` / `fanboost` / `kbd` / `osd restart` / `startup on|off` 会写 EC 寄存器或改计划任务，都是可逆操作。
 
 ---
@@ -232,6 +238,36 @@ schtasks /Query /TN OpenMIFS    # 也可以用系统命令查
 
 ---
 
+## 传感器（硬件监控）
+
+exe 的「传感器」选项卡，或 `.\src\mifs.ps1 sensors`。**全部免驱动**：
+只读 Windows 自带的性能计数器（PDH）、WMI 与 MIFS，不加载任何第三方内核组件。
+
+| 组件 | 指标 | 来源 |
+| :--- | :--- | :--- |
+| CPU | **封装功耗**（AMD RAPL）、每核功耗、SoC/VDDCR 域、插槽功耗 | PDH `\Energy Meter(*)\Power`（mW） |
+| CPU | 有效频率（估算）、负载 | PDH `\Processor Information(_Total)` |
+| 温度 | **热区 / 封装邻区温度**、高精度温度、**降频原因** | PDH `\Thermal Zone Information(*)\Temperature`（K） |
+| GPU | 利用率（按引擎）、专用显存占用 | WMI `Win32_PerfFormattedData_GPUPerformanceCounters_*` |
+| 内存 | 容量 / 类型 / 速率 / 占用 | WMI `Win32_PhysicalMemory` + `Win32_OperatingSystem` |
+| 存储 | 型号 / 介质 / 总线 / 健康 / **温度**（需管理员）/ 磨损 / 通电时长 | `MSFT_PhysicalDisk` + `MSFT_StorageReliabilityCounter` |
+| 风扇 | 双风扇转速 | MIFS `fn=13` |
+| 电池 | 电量 / 供电状态 / 健康度 | `Win32_Battery` + `root\wmi` 电池容量 |
+
+本机（无界 14 Pro 2023）实测：空闲 CPU 封装功耗 10.8 W、8 线程满载 35.8 W，
+热区温度 52.9 ℃ → 64.9 ℃ 随负载变化 —— 都是能标定的真值。
+命令 `.\src\mifs.ps1 sensors probe` 会逐项告诉你这台机器哪些通道可用。
+
+**读不到的**（需要内核驱动，本项目刻意不做）：**CPU die 温度 Tctl/Tdie**、
+主板/VRM/供电模块温度、内存温度。原因是 AMD 的 die 温度走 SMU 邮箱、电压/温度传感器在 EC 里，
+用户态碰不到；而能碰到它们的方案（WinRing0 等）已被微软列入**易受攻击驱动黑名单**，
+与"不加载任何驱动"的定位直接冲突。
+
+想要完整传感器（含 Tctl、主板、VRM），可以自己装并运行 LibreHardwareMonitor，
+本工具**不打包、不加载**它的驱动。技术分析与实测依据见 [docs/SENSORS.md](docs/SENSORS.md)。
+
+---
+
 ## 系统要求
 
 | | 要求 |
@@ -342,7 +378,8 @@ open-mifs/
 │  ├─ mifs.ps1             ← 命令行版
 │  ├─ mifs-gui.ps1         ← 图形界面（PowerShell + WinForms）
 │  └─ csharp/
-│     ├─ OpenMIFS.cs       ← 托盘 exe 源码
+│     ├─ OpenMIFS.cs       ← 托盘 exe 源码（界面 / MIFS / OSD / 日志）
+│     ├─ Sensors.cs        ← 传感器读取层（PDH + WMI + ADL 探测）
 │     └─ app.manifest      ← requireAdministrator + DPI
 ├─ build/
 │  ├─ build.ps1            ← 编译 exe
@@ -400,6 +437,11 @@ ACPI WMI 方法必须在**实例**上调用，不能在类上调用。本工具�
 
 **Q：切了模式感觉没变化？**
 跑 `bench` 实测。它会给出各档的 CPU 性能百分比和风扇峰值，用数据说话。
+
+**Q：传感器读数和 HWiNFO 对不上？**
+本工具用 Windows 自带的性能计数器，读的是同一个 RAPL 包功耗；差异一般来自采样时刻与平均窗口。
+要对比就同时看「满载稳定后」的值。注意本工具**不显示 CPU die 温度**（需要内核驱动，
+见 [传感器](#传感器硬件监控) 一节），HWiNFO 显示的是 SMU 的 Tctl，两者不是同一个量。
 
 **Q：会不会把电脑搞坏？**
 本工具只使用 MIFS 接口公开的功能号，且都是官方定义的可逆开关，不写未知寄存器。

@@ -36,8 +36,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.2.1.0")]
-[assembly: AssemblyFileVersion("0.2.1.0")]
+[assembly: AssemblyVersion("0.3.0.0")]
+[assembly: AssemblyFileVersion("0.3.0.0")]
 
 namespace OpenMIFS
 {
@@ -1044,6 +1044,13 @@ namespace OpenMIFS
         private readonly Button _btnRecap = new Button();
         private readonly CheckBox _chkDpi = new CheckBox();
         private readonly Label _lblDpi = new Label();
+        private readonly TabControl _tabs = new TabControl();
+        private TabPage _tabSensors;
+        private readonly TextBox _txtSensors = new TextBox();
+        private readonly Panel _pnlSensorBar = new Panel();
+        private readonly Button _btnSensorProbe = new Button();
+        private readonly Label _lblSensorHint = new Label();
+        private DateTime _lastSensorRefresh = DateTime.MinValue;
         private readonly TextBox _txtStatus = new TextBox();
         private readonly CheckBox _chkAuto = new CheckBox();
         private readonly ComboBox _cmbInterval = new ComboBox();
@@ -1377,16 +1384,61 @@ namespace OpenMIFS
             _lblDpi.AutoSize = false;
             gOsd.Controls.Add(_lblDpi);
 
-            // 状态面板
+            // 状态面板 / 传感器面板（用选项卡共用一块区域，不额外加高窗口）
             _txtStatus.Multiline = true;
             _txtStatus.ReadOnly = true;
             _txtStatus.ScrollBars = ScrollBars.Vertical;
             _txtStatus.WordWrap = false;
             _txtStatus.Font = new Font("Consolas", 9F);
-            _txtStatus.Location = new Point(12, 516);
-            _txtStatus.Size = new Size(456, 150);
+            _txtStatus.Dock = DockStyle.Fill;
             _txtStatus.BackColor = Color.FromArgb(250, 250, 250);
-            Controls.Add(_txtStatus);
+
+            _txtSensors.Multiline = true;
+            _txtSensors.ReadOnly = true;
+            _txtSensors.ScrollBars = ScrollBars.Vertical;
+            _txtSensors.WordWrap = false;
+            _txtSensors.Font = new Font("Consolas", 9F);
+            _txtSensors.Dock = DockStyle.Fill;
+            _txtSensors.BackColor = Color.FromArgb(250, 250, 250);
+            _txtSensors.Text = "切到本页会开始读取传感器（只读，不需要额外驱动）。" + Environment.NewLine
+                + "点下面的「探测数据源」可以看本机到底有哪些传感器通道可用。";
+
+            _pnlSensorBar.Dock = DockStyle.Bottom;
+            _pnlSensorBar.Height = 34;
+            _btnSensorProbe.Text = "探测数据源";
+            _btnSensorProbe.Location = new Point(4, 3);
+            _btnSensorProbe.Size = new Size(110, 28);
+            _btnSensorProbe.Font = new Font("Microsoft YaHei UI", 9F);
+            _btnSensorProbe.Click += OnSensorProbeClick;
+            _pnlSensorBar.Controls.Add(_btnSensorProbe);
+
+            _lblSensorHint.Location = new Point(122, 9);
+            _lblSensorHint.Size = new Size(320, 18);
+            _lblSensorHint.Font = _fontUi8;
+            _lblSensorHint.Text = "只读：PDH + WMI + MIFS，不加载任何驱动";
+            _lblSensorHint.AutoSize = false;
+            _pnlSensorBar.Controls.Add(_lblSensorHint);
+
+            TabPage pageStatus = new TabPage("状态");
+            pageStatus.UseVisualStyleBackColor = true;
+            pageStatus.Controls.Add(_txtStatus);
+
+            _tabSensors = new TabPage("传感器");
+            _tabSensors.UseVisualStyleBackColor = true;
+            _tabSensors.Controls.Add(_txtSensors);
+            _tabSensors.Controls.Add(_pnlSensorBar);
+
+            _tabs.Location = new Point(12, 516);
+            _tabs.Size = new Size(456, 150);
+            _tabs.Font = _fontUi8;
+            _tabs.TabPages.Add(pageStatus);
+            _tabs.TabPages.Add(_tabSensors);
+            _tabs.SelectedIndex = 0;
+            _tabs.SelectedIndexChanged += delegate
+            {
+                if (_tabs.SelectedTab == _tabSensors) RefreshSensors();
+            };
+            Controls.Add(_tabs);
 
             // 底部
             _chkAuto.Text = "自动刷新";
@@ -1412,6 +1464,53 @@ namespace OpenMIFS
             btnRefresh.Font = new Font("Microsoft YaHei UI", 9F);
             btnRefresh.Click += delegate { Log.Info("手动刷新"); RefreshAll(); };
             Controls.Add(btnRefresh);
+        }
+
+        // ────────────────────────────────────────────────────── 传感器
+        /// <summary>读取并渲染传感器面板（只在「传感器」页可见时才做，省开销）。</summary>
+        public void RefreshSensors()
+        {
+            if (_tabs.SelectedTab != _tabSensors) return;
+            if ((DateTime.Now - _lastSensorRefresh).TotalSeconds < 2) return;
+            _lastSensorRefresh = DateTime.Now;
+            try
+            {
+                DateTime t0 = DateTime.Now;
+                List<Reading> list = Sensors.ReadAll();
+                double ms = (DateTime.Now - t0).TotalMilliseconds;
+                if (ms > 400) Log.Warn("传感器：本轮读取耗时 " + ms.ToString("0", CultureInfo.InvariantCulture) + " ms（偏慢，可考虑降低刷新频率）");
+                _txtSensors.Text = Sensors.Render(list);
+                int ok = 0, fail = 0;
+                for (int i = 0; i < list.Count; i++) { if (list[i].Ok) ok++; else fail++; }
+                _lblSensorHint.Text = "可用 " + ok.ToString(CultureInfo.InvariantCulture)
+                    + " 项 / 未实现 " + fail.ToString(CultureInfo.InvariantCulture)
+                    + " 项 · 只读（PDH + WMI + MIFS）";
+            }
+            catch (Exception ex)
+            {
+                Log.Ex("读取传感器失败", ex);
+                _txtSensors.Text = "读取失败：" + ex.Message + Environment.NewLine + "详见日志 " + Log.FilePath;
+            }
+        }
+
+        private void OnSensorProbeClick(object sender, EventArgs e)
+        {
+            Cursor = Cursors.WaitCursor;
+            try
+            {
+                string text = Sensors.Probe();
+                _txtSensors.Text = text;
+                string file = Path.Combine(Log.Folder, "sensors-probe.txt");
+                try
+                {
+                    if (!Directory.Exists(Log.Folder)) Directory.CreateDirectory(Log.Folder);
+                    File.WriteAllText(file, text, new UTF8Encoding(false));
+                    Log.Info("传感器探测结果已写入 " + file);
+                }
+                catch (Exception ex2) { Log.Ex("写入传感器探测结果失败", ex2); }
+            }
+            catch (Exception ex) { Log.Ex("传感器探测失败", ex); Warn("探测失败：" + ex.Message); }
+            finally { Cursor = Cursors.Default; }
         }
 
         private void OnIntervalChanged(object sender, EventArgs e)
@@ -1910,6 +2009,9 @@ namespace OpenMIFS
                     + " OSD状态=" + _osdStatus);
             }
             if (StateChanged != null) StateChanged(this, EventArgs.Empty);
+
+            // 传感器只在「传感器」页可见时读取（PDH 有开销，没必要后台一直采）
+            RefreshSensors();
         }
 
         private DateTime _lastStartupCheck = DateTime.MinValue;
@@ -2146,10 +2248,29 @@ namespace OpenMIFS
         private static void Main(string[] args)
         {
             bool diagnose = false;
+            bool sensors = false;
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
                 if (a == "--diagnose" || a == "-d" || a == "/diagnose") diagnose = true;
+                if (a == "--sensors" || a == "-s" || a == "/sensors") sensors = true;
+            }
+
+            // 无界面模式：探测传感器数据源，写进 %LOCALAPPDATA%\OpenMIFS\sensors-probe.txt 后退出
+            if (sensors)
+            {
+                Log.Info("================ OpenMIFS " + MifsApp.VersionText + " 传感器探测 ================");
+                Log.Info("数据目录     : " + Log.Folder);
+                try
+                {
+                    string text = Sensors.Probe();
+                    if (!Directory.Exists(Log.Folder)) Directory.CreateDirectory(Log.Folder);
+                    string file = Path.Combine(Log.Folder, "sensors-probe.txt");
+                    File.WriteAllText(file, text, new UTF8Encoding(false));
+                    Log.Info("传感器探测结果已写入 " + file);
+                }
+                catch (Exception ex) { Log.Ex("传感器探测失败", ex); }
+                return;
             }
 
             // 无界面模式：采集 OSD 证据写进 %LOCALAPPDATA%\OpenMIFS\osd-diagnose.txt 后退出。

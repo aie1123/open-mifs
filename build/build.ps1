@@ -32,7 +32,10 @@ $repoRoot = if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { (Get-
 if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'dist' }
 if (-not $Icon)   { $Icon   = Join-Path $repoRoot 'assets\icon.ico' }
 
-$source   = Join-Path $repoRoot 'src\csharp\OpenMIFS.cs'
+$sources  = @(
+    (Join-Path $repoRoot 'src\csharp\OpenMIFS.cs'),
+    (Join-Path $repoRoot 'src\csharp\Sensors.cs')
+)
 $manifest = Join-Path $repoRoot 'src\csharp\app.manifest'
 $outExe   = Join-Path $OutDir  'OpenMIFS.exe'
 
@@ -55,16 +58,18 @@ Say "编译器  : $csc"
 Say "版本    : $cscVer"
 
 # ── 2. 检查输入
-foreach ($f in @($source, $manifest)) {
+foreach ($f in ($sources + $manifest)) {
     if (-not (Test-Path $f)) { throw "缺少文件：$f" }
 }
 # 源码必须带 UTF-8 BOM，否则 csc 会按系统代码页解析，中文全乱
-$bytes = [System.IO.File]::ReadAllBytes($source)
-$hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
-if (-not $hasBom) {
-    Say '源码缺少 UTF-8 BOM，自动补上（否则中文会乱码）' 'Yellow'
-    $text = [System.IO.File]::ReadAllText($source, [System.Text.Encoding]::UTF8)
-    [System.IO.File]::WriteAllText($source, $text, (New-Object System.Text.UTF8Encoding($true)))
+foreach ($f in $sources) {
+    $bytes = [System.IO.File]::ReadAllBytes($f)
+    $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+    if (-not $hasBom) {
+        Say "源码缺少 UTF-8 BOM，自动补上（否则中文会乱码）：$([System.IO.Path]::GetFileName($f))" 'Yellow'
+        $text = [System.IO.File]::ReadAllText($f, [System.Text.Encoding]::UTF8)
+        [System.IO.File]::WriteAllText($f, $text, (New-Object System.Text.UTF8Encoding($true)))
+    }
 }
 
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
@@ -95,9 +100,9 @@ elseif ($Icon) {
 }
 
 $argList.Add('/out:' + $outExe)
-$argList.Add($source)
+foreach ($f in $sources) { $argList.Add($f) }
 
-Say "源码    : $source"
+Say "源码    : $($sources -join ' + ')"
 Say "清单    : $manifest"
 Say "图标    : $iconUsed"
 Say "输出    : $outExe"

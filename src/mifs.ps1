@@ -16,6 +16,8 @@
 
   用法
     .\mifs.ps1 status              显示状态（默认动作）
+    .\mifs.ps1 sensors             传感器读数（封装功耗 / 频率 / 热区温度 / GPU / 内存 / 磁盘 / 风扇 / 电池）
+    .\mifs.ps1 sensors probe       枚举本机可用的传感器计数器集与实例，逐项判定可用性、打印结论
     .\mifs.ps1 probe               诊断调用链（先跑这个）
     .\mifs.ps1 test                逐个探测驱动清单里的功能号
     .\mifs.ps1 scan [最大号]       扫描 0..N（默认 63）找出所有可用功能号
@@ -38,7 +40,8 @@
     与图形版共用同一份日志：%LOCALAPPDATA%\OpenMIFS\openmifs.log（超过 1 MB 自动轮转）。
 
   安全
-    status / probe / test / scan / raw / osd status / osd diagnose / osd dpi / startup status / log
+    status / sensors / sensors probe / probe / test / scan / raw
+    osd status / osd diagnose / osd dpi / startup status / log
                                         只读，不改任何状态。
     mode / fanboost / kbd / osd restart / osd dpi-on|off / startup on|off
                                         会写 EC 寄存器、注册表或计划任务，均为可逆操作。
@@ -48,7 +51,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status', 'probe', 'test', 'scan', 'bench', 'mode', 'fanboost', 'kbd', 'raw', 'osd', 'startup', 'log')]
+    [ValidateSet('status', 'probe', 'test', 'scan', 'bench', 'mode', 'fanboost', 'kbd', 'raw', 'osd', 'startup', 'log', 'sensors')]
     [string]$Action = 'status',
 
     [Parameter(Position = 1)]
@@ -470,6 +473,570 @@ function Show-Log {
     Write-Host ''
 }
 
+# ──────────────────────────────── 传感器（零驱动、只读；与 src/csharp/Sensors.cs 对齐）
+# 数据源、单位与坑见 docs/SENSORS.md。三条硬规矩：
+#   · PDH 一律用 Get-Counter 一次批量取，且必须 -SampleInterval 1 -MaxSamples 1
+#     （它内部要采两次；速率类计数器 Power / % Processor Time 不预热就会读回 0 —— C# 版踩过）
+#   · 实例名（rapl_package0_pkg / _tz.tz01）因机型而异 → 运行时探测，读不到就显示「未实现」，不猜
+#   · 单位靠标定：Energy Meter 的 Power 是 mW；热区 Temperature 是 K，High Precision 是 0.1 K
+$script:SensorSets  = @('Energy Meter', 'Thermal Zone Information', 'GPU Engine', 'GPU Adapter Memory', 'Processor Information')
+$script:SensorError = ''
+$script:SensorStats = @{ Ok = 0; Fail = 0 }
+
+function Format-Inv {
+    param([string]$Format, [object[]]$Arguments)
+    return [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, $Format, $Arguments)
+}
+
+# 中文按 2 列宽算，等宽面板才对得齐
+function Get-DisplayWidth {
+    param([string]$Text)
+    $w = 0
+    foreach ($ch in $Text.ToCharArray()) {
+        $c = [int]$ch
+        if (($c -ge 0x1100 -and $c -le 0x115F) -or ($c -ge 0x2E80 -and $c -le 0xA4CF) -or
+            ($c -ge 0xAC00 -and $c -le 0xD7A3) -or ($c -ge 0xF900 -and $c -le 0xFAFF) -or
+            ($c -ge 0xFE30 -and $c -le 0xFE6F) -or ($c -ge 0xFF00 -and $c -le 0xFF60) -or
+            ($c -ge 0xFFE0 -and $c -le 0xFFE6)) { $w += 2 } else { $w += 1 }
+    }
+    return $w
+}
+
+function New-SensorReading {
+    param([string]$Group, [string]$Name, [string]$Value, [bool]$Ok, [string]$Note = '')
+    return [pscustomobject]@{ Group = $Group; Name = $Name; Value = $Value; Ok = $Ok; Note = $Note }
+}
+
+# 计数器集目录：只回答「本机有没有这个计数器/实例」，不采样，所以很快
+function Get-CounterCatalog {
+    param([string[]]$SetNames)
+    $map = @{}
+    foreach ($n in $SetNames) {
+        try {
+            $ls = Get-Counter -ListSet $n -ErrorAction Stop
+            $inst = @(); $seen = @{}
+            foreach ($p in @($ls.PathsWithInstances)) {
+                # \Energy Meter(RAPL_Package0_PKG)\Power -> RAPL_Package0_PKG
+                if ($p -match '^\\[^\\]+\((.+)\)\\[^\\]+$') {
+                    if (-not $seen.ContainsKey($matches[1])) { $seen[$matches[1]] = $true; $inst += $matches[1] }
+                }
+            }
+            $cnt = @(); $seenC = @{}
+            foreach ($c in @($ls.Counter)) {
+                $nm = $c
+                if ($c -match '^\\[^\\]+\(\*\)\\(.+)$') { $nm = $matches[1] }
+                if (-not $seenC.ContainsKey($nm)) { $seenC[$nm] = $true; $cnt += $nm }
+            }
+            $map[$n] = [pscustomobject]@{ Name = $n; Counters = $cnt; Instances = $inst }
+        }
+        catch { $map[$n] = $null }
+    }
+    return $map
+}
+
+function Test-CounterName {
+    param($Catalog, [string]$SetName, [string]$CounterName)
+    if (-not $Catalog.ContainsKey($SetName) -or -not $Catalog[$SetName]) { return $false }
+    foreach ($c in $Catalog[$SetName].Counters) { if ($c -eq $CounterName) { return $true } }
+    return $false
+}
+
+function Select-CounterInstance {
+    param([string[]]$Instances, [string]$Pattern)
+    $hit = @($Instances | Where-Object { $_ -match $Pattern }) | Sort-Object | Select-Object -First 1
+    if ($null -eq $hit) { return '' }
+    return [string]$hit
+}
+
+# 采样键：实例名 + 计数器名（小写）。
+# 注意：Windows PowerShell 5.1 的 CounterSample 没有 CounterName 属性（读出来是空），
+# 只能从 Path 尾部取计数器名 —— 两种 PowerShell 下都成立。
+function Get-SampleKey {
+    param($Sample)
+    $p = [string]$Sample.Path
+    $i = $p.LastIndexOf('\')
+    $cn = $p
+    if ($i -ge 0) { $cn = $p.Substring($i + 1) }
+    return (([string]$Sample.InstanceName) + '|' + $cn).ToLowerInvariant()
+}
+
+# 一次批量取。批量失败（本机缺某个计数器会拖垮整批）才逐条降级，缺的那条只记错误
+function Get-SensorSampleMap {
+    param([string[]]$Paths)
+    $map = @{}
+    if (-not $Paths -or $Paths.Count -eq 0) { return $map }
+    try {
+        $set = Get-Counter -Counter $Paths -SampleInterval 1 -MaxSamples 1 -ErrorAction Stop
+        foreach ($s in $set.CounterSamples) { $map[(Get-SampleKey $s)] = [double]$s.CookedValue }
+        return $map
+    }
+    catch { }
+    foreach ($p in $Paths) {
+        try {
+            $set = Get-Counter -Counter $p -SampleInterval 1 -MaxSamples 1 -ErrorAction Stop
+            foreach ($s in $set.CounterSamples) { $map[(Get-SampleKey $s)] = [double]$s.CookedValue }
+        }
+        catch { $script:SensorError = "$p： $($_.Exception.Message)" }
+    }
+    return $map
+}
+
+function Get-SampleValue {
+    param($Map, [string]$Instance, [string]$Counter)
+    if (-not $Instance) { return $null }
+    $k = ($Instance + '|' + $Counter).ToLowerInvariant()
+    if ($Map.ContainsKey($k)) { return [double]$Map[$k] }
+    return $null
+}
+
+function Get-MemoryTypeName {
+    param([int]$Code)
+    switch ($Code) {
+        20 { return 'DDR' }
+        21 { return 'DDR2' }
+        24 { return 'DDR3' }
+        26 { return 'DDR4' }
+        27 { return 'LPDDR' }
+        28 { return 'LPDDR2' }
+        29 { return 'LPDDR3' }
+        30 { return 'LPDDR4' }
+        34 { return 'DDR5' }
+        35 { return 'LPDDR5' }
+    }
+    if ($Code -gt 0) { return "类型$Code" }
+    return ''
+}
+
+function Get-DiskMediaName {
+    param([int]$Code)
+    switch ($Code) {
+        3 { return 'HDD' }
+        4 { return 'SSD' }
+        5 { return 'SCM' }
+    }
+    if ($Code -gt 0) { return "介质$Code" }
+    return ''
+}
+
+function Get-DiskBusName {
+    param([int]$Code)
+    switch ($Code) {
+        1 { return 'SCSI' }
+        2 { return 'ATAPI' }
+        3 { return 'ATA' }
+        7 { return 'USB' }
+        8 { return 'RAID' }
+        10 { return 'SAS' }
+        11 { return 'SATA' }
+        13 { return 'MMC' }
+        14 { return '虚拟' }
+        15 { return '文件虚拟' }
+        16 { return '存储空间' }
+        17 { return 'NVMe' }
+        18 { return 'SCM' }
+        19 { return 'UFS' }
+    }
+    if ($Code -gt 0) { return "总线$Code" }
+    return ''
+}
+
+function Get-DiskHealthName {
+    param([int]$Code)
+    switch ($Code) {
+        0 { return '健康' }
+        1 { return '警告' }
+        2 { return '不健康' }
+    }
+    if ($Code -gt 0) { return "状态$Code" }
+    return ''
+}
+
+# ── 读全部传感器（只读）
+function Get-SensorReadings {
+    $script:SensorError = ''
+    $list = New-Object System.Collections.Generic.List[object]
+    $catalog = Get-CounterCatalog -SetNames $script:SensorSets
+
+    $emInst = @()
+    if ($catalog['Energy Meter']) { $emInst = @($catalog['Energy Meter'].Instances) }
+    $pkgInst  = Select-CounterInstance $emInst '^RAPL_Package\d+_PKG$'
+    $sockInst = Select-CounterInstance $emInst '^Current Socket Power$'
+    if (-not $sockInst) { $sockInst = Select-CounterInstance $emInst '^Apu Power$' }
+    $vddInst  = Select-CounterInstance $emInst '^VDDCR_VDD Power$'
+    $socInst  = Select-CounterInstance $emInst '^VDDCR_SOC Power$'
+    $coreInst = @($emInst | Where-Object { $_ -match '^RAPL_Package\d+_Core\d+_CORE$' }) | Sort-Object
+
+    $zoneInst = ''
+    if ($catalog['Thermal Zone Information'] -and @($catalog['Thermal Zone Information'].Instances).Count -gt 0) {
+        $zoneInst = [string]@($catalog['Thermal Zone Information'].Instances)[0]
+    }
+
+    # 含无效路径会让整批 Get-Counter 失败，所以先按目录过滤，再一次性采完
+    $specs = @(
+        @{ Set = 'Energy Meter';             Counter = 'Power';                      Path = '\Energy Meter(*)\Power' },
+        @{ Set = 'Processor Information';    Counter = 'Processor Frequency';        Path = '\Processor Information(_Total)\Processor Frequency' },
+        @{ Set = 'Processor Information';    Counter = '% Processor Performance';    Path = '\Processor Information(_Total)\% Processor Performance' },
+        @{ Set = 'Processor Information';    Counter = '% Processor Time';           Path = '\Processor Information(_Total)\% Processor Time' },
+        @{ Set = 'Thermal Zone Information'; Counter = 'Temperature';                Path = '\Thermal Zone Information(*)\Temperature' },
+        @{ Set = 'Thermal Zone Information'; Counter = 'High Precision Temperature'; Path = '\Thermal Zone Information(*)\High Precision Temperature' },
+        @{ Set = 'Thermal Zone Information'; Counter = 'Throttle Reasons';           Path = '\Thermal Zone Information(*)\Throttle Reasons' }
+    )
+    $paths = @()
+    foreach ($sp in $specs) { if (Test-CounterName $catalog $sp.Set $sp.Counter) { $paths += $sp.Path } }
+    $samples = Get-SensorSampleMap -Paths $paths
+
+    # ── CPU：封装功耗
+    $pkg = Get-SampleValue $samples $pkgInst 'Power'
+    if ($null -ne $pkg) {
+        $list.Add((New-SensorReading 'CPU' '封装功耗' (Format-Inv '{0:0.00} W' @($pkg / 1000.0)) $true ('PDH Energy Meter / ' + $pkgInst)))
+    }
+    else {
+        $list.Add((New-SensorReading 'CPU' '封装功耗' '未实现' $false '本机没有 rapl_packageN_pkg 计数器'))
+    }
+
+    # ── CPU：有效频率（估算）= Processor Frequency × % Processor Performance
+    $freq = Get-SampleValue $samples '_Total' 'Processor Frequency'
+    $perf = Get-SampleValue $samples '_Total' '% Processor Performance'
+    if ($null -ne $freq -and $null -ne $perf) {
+        $list.Add((New-SensorReading 'CPU' '有效频率（估算）' (Format-Inv '{0:0.00} GHz' @($freq * $perf / 100.0 / 1000.0)) $true (Format-Inv '{0:0} MHz × {1:0.0}%' @($freq, $perf))))
+    }
+    else {
+        $list.Add((New-SensorReading 'CPU' '有效频率' '未实现' $false 'Processor Information 计数器不可用'))
+    }
+
+    # ── CPU：负载
+    $load = Get-SampleValue $samples '_Total' '% Processor Time'
+    if ($null -ne $load) {
+        $list.Add((New-SensorReading 'CPU' '负载' (Format-Inv '{0:0.0} %' @($load)) $true 'PDH % Processor Time（_Total）'))
+    }
+
+    # ── CPU：每核功耗（最多列 8 个）
+    if (@($coreInst).Count -gt 0) {
+        $sb = New-Object System.Text.StringBuilder
+        $shown = 0
+        foreach ($ci in @($coreInst)) {
+            if ($shown -ge 8) { break }
+            $v = Get-SampleValue $samples $ci 'Power'
+            if ($null -eq $v) { continue }
+            if ($shown -gt 0) { [void]$sb.Append(' / ') }
+            [void]$sb.Append((Format-Inv '{0:0.00}' @($v / 1000.0)))
+            $shown++
+        }
+        if ($shown -gt 0) {
+            $list.Add((New-SensorReading 'CPU' '核心功耗 W' $sb.ToString() $true (Format-Inv '{0} 个核域（PDH）' @(@($coreInst).Count))))
+        }
+    }
+
+    # ── CPU：供电域 VDDCR / SoC
+    if ($vddInst -or $socInst) {
+        $v1 = Get-SampleValue $samples $vddInst 'Power'
+        $v2 = Get-SampleValue $samples $socInst 'Power'
+        $t1 = if ($null -ne $v1) { Format-Inv '{0:0.00} W' @($v1 / 1000.0) } else { '—' }
+        $t2 = if ($null -ne $v2) { Format-Inv '{0:0.00} W' @($v2 / 1000.0) } else { '—' }
+        $list.Add((New-SensorReading 'CPU' 'VDDCR / SoC' ($t1 + ' / ' + $t2) ($null -ne $v1 -or $null -ne $v2) '供电域功耗（PDH Energy Meter）'))
+    }
+
+    # ── CPU：插槽功耗
+    if ($sockInst) {
+        $sock = Get-SampleValue $samples $sockInst 'Power'
+        if ($null -ne $sock) {
+            $list.Add((New-SensorReading 'CPU' '插槽功耗' (Format-Inv '{0:0.00} W' @($sock / 1000.0)) $true $sockInst))
+        }
+    }
+
+    # ── 温度：ACPI 热区（只取第一个实例）
+    if ($zoneInst) {
+        $t  = Get-SampleValue $samples $zoneInst 'Temperature'
+        $hp = Get-SampleValue $samples $zoneInst 'High Precision Temperature'
+        $th = Get-SampleValue $samples $zoneInst 'Throttle Reasons'
+        if ($null -ne $t) {
+            $note = 'ACPI 热区 ' + $zoneInst
+            if ($null -ne $hp) { $note += '，高精度 ' + (Format-Inv '{0:0.0} ℃' @($hp / 10.0 - 273.15)) }
+            if ($null -ne $th) {
+                $note += '，降频原因 ' + (Format-Inv '{0:0}' @($th))
+                if ($th -eq 0) { $note += '（正常）' } else { $note += '（正在降频！）' }
+            }
+            $list.Add((New-SensorReading '温度' '热区 / 封装邻区' (Format-Inv '{0:0.0} ℃' @($t - 273.15)) $true $note))
+        }
+    }
+    else {
+        $list.Add((New-SensorReading '温度' '热区 / 封装邻区' '未实现' $false '本机没有 Thermal Zone Information 计数器'))
+    }
+
+    # ── 温度：CPU die 温度写死不支持
+    $list.Add((New-SensorReading '温度' 'CPU die 温度' '不支持' $false 'AMD SMU 需要内核驱动，本项目不做（见 docs/SENSORS.md）'))
+
+    # ── GPU：利用率（按 engtype_ 分组求和）
+    $gpu = @()
+    try { $gpu = @(Get-CimInstance -ClassName 'Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine' -ErrorAction Stop) }
+    catch { $script:SensorError = "GPU Engine： $($_.Exception.Message)" }
+    if (@($gpu).Count -gt 0) {
+        $byType = @{}
+        $total = 0.0
+        foreach ($g in @($gpu)) {
+            $val = [double]$g.UtilizationPercentage
+            if ($val -le 0.01) { continue }
+            $type = '其它'
+            $k = ([string]$g.Name).IndexOf('engtype_', [System.StringComparison]::OrdinalIgnoreCase)
+            if ($k -ge 0) { $type = ([string]$g.Name).Substring($k + 8) }
+            if (-not $byType.ContainsKey($type)) { $byType[$type] = 0.0 }
+            $byType[$type] += $val
+            $total += $val
+        }
+        $busiest = '—'
+        $best = 0.0
+        foreach ($k in @($byType.Keys)) { if ($byType[$k] -gt $best) { $best = $byType[$k]; $busiest = $k } }
+        $list.Add((New-SensorReading 'GPU' '利用率' (Format-Inv '{0} {1:0.0} %（合计 {2:0.0} %）' @($busiest, $best, $total)) $true 'WMI GPU Engine（Windows 原生）'))
+    }
+    else {
+        $list.Add((New-SensorReading 'GPU' '利用率' '未实现' $false 'GPU Engine 计数器不可用'))
+    }
+
+    # ── GPU：专用显存占用
+    $gm = @()
+    try { $gm = @(Get-CimInstance -ClassName 'Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory' -ErrorAction Stop) }
+    catch { }
+    if (@($gm).Count -gt 0) {
+        $memSum = 0.0
+        foreach ($m in @($gm)) { if ([double]$m.DedicatedUsage -gt 0) { $memSum += [double]$m.DedicatedUsage } }
+        $list.Add((New-SensorReading 'GPU' '专用显存占用' (Format-Inv '{0:0} MB' @($memSum / 1048576.0)) $true 'WMI GPU Adapter Memory'))
+    }
+
+    # ── GPU：温度 / 频率——不做 ADL P/Invoke（C# 版实测本机核显取不到）
+    $list.Add((New-SensorReading 'GPU' '温度 / 频率' '未实现' $false '核显多不支持 ADL Overdrive 温度；与管理员权限无关，提权后同样取不到（C# 版实测）'))
+
+    # ── 内存
+    try {
+        $mods = @(Get-CimInstance -ClassName 'Win32_PhysicalMemory' -ErrorAction Stop)
+        $totalBytes = 0.0; $modules = 0; $speed = 0; $smbios = 0
+        foreach ($m in $mods) {
+            $modules++
+            $totalBytes += [double]$m.Capacity
+            $sp = [int]$m.ConfiguredClockSpeed
+            if ($sp -eq 0) { $sp = [int]$m.Speed }
+            if ($sp -gt $speed) { $speed = $sp }
+            if ($smbios -eq 0) { $smbios = [int]$m.SMBIOSMemoryType }
+        }
+        $os = @(Get-CimInstance -ClassName 'Win32_OperatingSystem' -ErrorAction Stop)
+        $totalKb = 0.0; $freeKb = 0.0
+        if (@($os).Count -gt 0) {
+            $totalKb = [double]$os[0].TotalVisibleMemorySize   # KB
+            $freeKb  = [double]$os[0].FreePhysicalMemory       # KB
+        }
+        if ($modules -gt 0) {
+            $typeName = Get-MemoryTypeName -Code $smbios
+            $spec = Format-Inv '{0:0.0} GB  {1}×{2:0} GB {3}{4}' @(($totalBytes / 1073741824.0), $modules, ($totalBytes / 1073741824.0 / $modules), $typeName, $(if ($speed -gt 0) { '-' + $speed } else { '' }))
+            $list.Add((New-SensorReading '内存' '容量 / 规格' $spec $true 'WMI Win32_PhysicalMemory'))
+        }
+        if ($totalKb -gt 0) {
+            $usedGb = ($totalKb - $freeKb) / 1048576.0
+            $totalGb = $totalKb / 1048576.0
+            $list.Add((New-SensorReading '内存' '占用' (Format-Inv '{0:0.0} / {1:0.0} GB（{2:0.0} %）' @($usedGb, $totalGb, ($usedGb / $totalGb * 100.0))) $true 'WMI Win32_OperatingSystem'))
+        }
+    }
+    catch { $script:SensorError = "读内存失败： $($_.Exception.Message)" }
+
+    # ── 存储（可靠性计数器要管理员：整表查一次，再按 DeviceId 与磁盘配对）
+    try {
+        $rel = @{}
+        $relError = ''
+        try {
+            foreach ($c in @(Get-CimInstance -Namespace 'root/Microsoft/Windows/Storage' -ClassName 'MSFT_StorageReliabilityCounter' -ErrorAction Stop)) {
+                $did = [string]$c.DeviceId
+                if ($did -and -not $rel.ContainsKey($did)) { $rel[$did] = $c }
+            }
+        }
+        catch { $relError = $_.Exception.Message }
+
+        foreach ($d in @(Get-CimInstance -Namespace 'root/Microsoft/Windows/Storage' -ClassName 'MSFT_PhysicalDisk' -ErrorAction Stop)) {
+            $name  = [string]$d.FriendlyName
+            $media = Get-DiskMediaName -Code ([int]$d.MediaType)
+            $bus   = Get-DiskBusName -Code ([int]$d.BusType)
+            $hea   = Get-DiskHealthName -Code ([int]$d.HealthStatus)
+            $value = Format-Inv '{0:0} GB' @([double]$d.Size / 1073741824.0)
+            $note  = 'WMI Storage'
+            if ($bus) { $note += ' / ' + $bus }
+            if ($hea) { $note += ' / ' + $hea }
+            $did = [string]$d.DeviceId
+            if ($rel.ContainsKey($did)) {
+                $c = $rel[$did]
+                $temp = [int]$c.Temperature
+                $wear = [int]$c.Wear
+                $hours = [long]$c.PowerOnHours
+                if ($temp -gt 0) { $value += '  ' + $temp + ' ℃' } else { $value += '  温度未知' }
+                $value += '  磨损 ' + $wear
+                if ($hours -gt 0) { $value += '  通电 ' + $hours + ' h' }
+                $note += ' + StorageReliabilityCounter'
+            }
+            elseif ($relError) { $note += '（温度需管理员：' + $relError + '）' }
+            else { $note += '（该盘没有可靠性计数器）' }
+            $title = $name
+            if ($media) { $title += '（' + $media + '）' }
+            $list.Add((New-SensorReading '存储' $title $value $true $note))
+        }
+    }
+    catch { $script:SensorError = "读磁盘失败： $($_.Exception.Message)" }
+
+    # ── 风扇（复用项目已有的 MIFS 读取）
+    $fan = Get-MifsFan
+    if ($fan) {
+        $f3 = ''
+        if ($fan[2] -gt 0) { $f3 = ' / ' + $fan[2] }
+        $list.Add((New-SensorReading '风扇 / 电池' '风扇' (Format-Inv '{0} / {1}{2} RPM' @($fan[0], $fan[1], $f3)) $true 'MIFS fn=13'))
+    }
+    else {
+        $list.Add((New-SensorReading '风扇 / 电池' '风扇' '未实现' $false 'MIFS 不可用（需要管理员）'))
+    }
+
+    # ── 电池
+    try {
+        $charge = $null; $status = $null
+        $bat = @(Get-CimInstance -ClassName 'Win32_Battery' -ErrorAction Stop)
+        if (@($bat).Count -gt 0) {
+            $charge = [int]$bat[0].EstimatedChargeRemaining
+            $status = [int]$bat[0].BatteryStatus      # 2 = 外接电源
+        }
+        # 必须投影属性：整实例枚举（不带 -Property）在本机会报「常规故障」，
+        # 而 C# 的 WQL SELECT DesignedCapacity 是投影查询 —— 两者等价，投影才取得到值
+        $design = 0; $full = 0
+        try {
+            $d = @(Get-CimInstance -Namespace 'root/wmi' -ClassName 'BatteryStaticData' -Property DesignedCapacity -ErrorAction Stop)
+            if ($d.Count -gt 0) { $design = [int]$d[0].DesignedCapacity }
+        }
+        catch { }
+        try {
+            $f = @(Get-CimInstance -Namespace 'root/wmi' -ClassName 'BatteryFullChargedCapacity' -Property FullChargedCapacity -ErrorAction Stop)
+            if ($f.Count -gt 0) { $full = [int]$f[0].FullChargedCapacity }
+        }
+        catch { }
+        if ($null -ne $charge) {
+            $ac = ''
+            if ($null -ne $status) { if ($status -eq 2) { $ac = '外接电源' } else { $ac = '电池供电' } }
+            $v = [string]$charge + ' %'
+            if ($ac) { $v += '  ' + $ac }
+            $note = 'WMI Win32_Battery'
+            if ($design -gt 0 -and $full -gt 0) {
+                $v += Format-Inv '  健康 {0:0.0} %（{1}/{2} mWh）' @((($full * 100.0) / $design), $full, $design)
+                $note += ' + root\wmi 电池容量'
+            }
+            elseif ($full -gt 0) {
+                $v += Format-Inv '  满充容量 {0} mWh' @($full)
+                $note += ' + root\wmi 满充容量'
+            }
+            elseif ($design -gt 0) {
+                $v += Format-Inv '  设计容量 {0} mWh' @($design)
+                $note += ' + root\wmi 设计容量'
+            }
+            else {
+                $v += '  电池容量需管理员'
+            }
+            $list.Add((New-SensorReading '风扇 / 电池' '电池' $v $true $note))
+        }
+    }
+    catch { $script:SensorError = "读电池失败： $($_.Exception.Message)" }
+
+    # 注意：PowerShell 5.1 里 @($genericList) 会抛「Argument types do not match」，用 .Count
+    $okCount = @($list | Where-Object { $_.Ok }).Count
+    $script:SensorStats = @{ Ok = $okCount; Fail = ($list.Count - $okCount) }
+    return $list
+}
+
+# ── 渲染成等宽文本面板（GUI 直接用这个）
+function Format-SensorPanel {
+    param($Readings)
+    $sb = New-Object System.Collections.Generic.List[string]
+    $group = ''
+    foreach ($r in $Readings) {
+        if ($r.Group -ne $group) { $group = $r.Group; $sb.Add("== $group ==") }
+        # 标签统一按 16 显示列对齐（最长的是「有效频率（估算）」= 8 汉字 = 16 列），
+        # 动态名字（磁盘型号）超长时自然溢出，不让冒号错位
+        $pad = 16 - (Get-DisplayWidth $r.Name)
+        if ($pad -lt 0) { $pad = 0 }
+        $sb.Add($r.Name + (' ' * $pad) + ': ' + $r.Value)
+        if ($r.Note) { $sb.Add((' ' * 17) + '└ ' + $r.Note) }
+    }
+    $sb.Add('')
+    $sb.Add('数据源：PDH(Energy Meter / Thermal Zone / GPU Engine / Processor) + WMI + MIFS')
+    $sb.Add('刷新  ：' + (Get-Date).ToString('HH:mm:ss'))
+    if ($script:SensorError) { $sb.Add('最后错误：' + $script:SensorError) }
+    return ($sb -join "`r`n")
+}
+
+# ── 探测报告（纯文本行；CLI 上色打印，GUI 直接拼成字符串）
+function Get-SensorProbeLines {
+    $L = New-Object System.Collections.Generic.List[string]
+    $L.Add('===== OpenMIFS 传感器探测 =====')
+    $L.Add("主机：$env:COMPUTERNAME   时间：$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))")
+    $L.Add('')
+    $catalog = Get-CounterCatalog -SetNames $script:SensorSets
+    foreach ($n in $script:SensorSets) {
+        $L.Add("── 计数器集：$n")
+        $c = $catalog[$n]
+        if (-not $c) { $L.Add('   不可用（本机没有这个计数器集）'); $L.Add(''); continue }
+        $L.Add('   计数器：' + (@($c.Counters) -join '、'))
+        $inst = @($c.Instances)
+        if ($inst.Count -eq 0) { $L.Add('   实例  ：（无实例）') }
+        elseif ($inst.Count -le 10) { $L.Add('   实例  ：' + ($inst -join '、')) }
+        else { $L.Add('   实例  ：' + (($inst | Select-Object -First 8) -join '、') + (Format-Inv ' …（共 {0} 个）' @($inst.Count))) }
+        $L.Add('')
+    }
+    $L.Add('── 逐项探测')
+    $readings = Get-SensorReadings
+    $group = ''
+    foreach ($r in $readings) {
+        if ($r.Group -ne $group) { $group = $r.Group; $L.Add("   [$group]") }
+        $tag = 'FAIL'
+        if ($r.Ok) { $tag = 'OK  ' }
+        $line = "   $tag $($r.Name) = $($r.Value)"
+        if ($r.Note) { $line += "    ← $($r.Note)" }
+        $L.Add($line)
+    }
+    $L.Add('')
+    $L.Add('── 结论')
+    $L.Add((Format-Inv '   可用 {0} 项 / 未实现 {1} 项' @($script:SensorStats.Ok, $script:SensorStats.Fail)))
+    $L.Add('   本机可用的免驱动数据源已列在上方（OK 行）。FAIL 行说明该机型没有对应计数器/接口。')
+    $L.Add('   CPU die 温度、主板/VRM/内存温度需要内核驱动，本项目刻意不做，见 docs/SENSORS.md。')
+    return $L
+}
+
+function Write-SensorLog {
+    param([string]$Action)
+    Write-MifsLog 'INFO ' ("{0}: 可用 {1} 项 / 未实现 {2} 项" -f $Action, $script:SensorStats.Ok, $script:SensorStats.Fail)
+}
+
+function Show-Sensors {
+    Write-Host ''
+    Write-Host '===== OpenMIFS 传感器（零驱动，只读） =====' -ForegroundColor Cyan
+    $readings = Get-SensorReadings
+    $group = ''
+    foreach ($r in $readings) {
+        if ($r.Group -ne $group) { $group = $r.Group; Write-Host "== $group ==" -ForegroundColor Cyan }
+        $pad = 16 - (Get-DisplayWidth $r.Name)
+        if ($pad -lt 0) { $pad = 0 }
+        $line = $r.Name + (' ' * $pad) + ': ' + $r.Value
+        if ($r.Ok) { Write-Host $line } else { Write-Host $line -ForegroundColor DarkGray }
+        if ($r.Note) { Write-Host ((' ' * 17) + '└ ' + $r.Note) -ForegroundColor DarkGray }
+    }
+    Write-Host ''
+    Write-Host '数据源：PDH(Energy Meter / Thermal Zone / GPU Engine / Processor) + WMI + MIFS'
+    Write-Host ("刷新  ：{0}" -f (Get-Date).ToString('HH:mm:ss'))
+    if ($script:SensorError) { Write-Host ("最后错误：{0}" -f $script:SensorError) -ForegroundColor DarkGray }
+    Write-Host ''
+    Write-SensorLog 'sensors'
+}
+
+function Show-SensorsProbe {
+    Write-Host ''
+    $lines = Get-SensorProbeLines
+    foreach ($ln in $lines) {
+        if ($ln -like '=====*' -or $ln -like '──*') { Write-Host $ln -ForegroundColor Cyan }
+        elseif ($ln -like '*FAIL*') { Write-Host $ln -ForegroundColor DarkGray }
+        else { Write-Host $ln }
+    }
+    Write-Host ''
+    Write-SensorLog 'sensors probe'
+}
+
 # ──────────────────────────────── 动作
 function Show-Probe {
     Write-Host ''
@@ -677,6 +1244,11 @@ function Show-Status {
 try {
     switch ($Action) {
         'status' { Show-Status }
+        'sensors' {
+            if ($Value -eq 'probe') { Show-SensorsProbe }
+            elseif (-not $Value -or $Value -eq 'status') { Show-Sensors }
+            else { throw 'sensors 需要 status / probe' }
+        }
         'probe'  { Show-Probe }
         'test'   { Show-Test }
         'scan'   {

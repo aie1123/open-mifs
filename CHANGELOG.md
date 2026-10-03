@@ -2,6 +2,48 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-10-03
+
+### 新增
+
+- **传感器面板（零驱动）**：exe 与 `mifs-gui.ps1` 新增「传感器」选项卡，命令行新增 `sensors` / `sensors probe`
+  （三种形态共用同一套读数与判定逻辑）
+  - CPU：**封装功耗（AMD RAPL）**、每核功耗、SoC/VDDCR 供电域、插槽功耗 —— PDH `\Energy Meter(*)\Power`（mW）
+  - CPU：有效频率（估算）、负载 —— PDH `\Processor Information(_Total)`
+  - 温度：**热区 / 封装邻区温度**、高精度温度、**降频原因位域** —— PDH `\Thermal Zone Information(*)`（K / 0.1K）
+  - GPU：按引擎的利用率、专用显存占用 —— WMI `Win32_PerfFormattedData_GPUPerformanceCounters_*`
+  - 内存：容量/类型/速率/占用；存储：型号/介质/总线/健康/**温度**（需管理员）/磨损/通电时长
+  - 风扇（MIFS）、电池（电量/供电/健康度）
+  - `sensors probe` 逐项报告本机哪些传感器通道可用，结论可用于其它机型适配
+  - 新增 `OpenMIFS.exe --sensors`：无界面探测，输出 `%LOCALAPPDATA%\OpenMIFS\sensors-probe.txt`
+- 新增 [docs/SENSORS.md](docs/SENSORS.md)：可行性分析、**单位标定实测**、踩坑清单、被排除的方案
+
+### 关键实现记录（都是实测踩出来的）
+
+- **PDH 速率类计数器必须先预热**：`\Energy Meter(*)\Power` 等第一次读会返回 0。
+  做法是一次性建好全部计数器、各采一次，再统一等 700 ms 采样窗口，之后才有真值。
+- **单位不能猜**：`Energy Meter\Power` 是**毫瓦**（本机空闲 10773 → 8 线程满载 35757，即 10.8 W → 35.8 W）；
+  热区 `Temperature` 是**开尔文**、`High Precision Temperature` 是**0.1 K**。
+- **不要用累计的 `Energy` 计数做差分算功率**：单精度浮点 + 从开机累计，11 秒的差值会被舍入误差淹没。
+- **GPU 百分比要用 WMI 的「已格式化」类**：`PerformanceCounterCategory.ReadCategory()` 只给原始值，
+  `RAW_FRACTION` 类计数器拿不到 Base，算不出百分比。
+- **磁盘温度按 `DeviceId` 配对**：WQL `ASSOCIATORS OF` 在 `ObjectId` 含引号时解析失败，改用整表查 + `DeviceId` 匹配。
+- **实例名是机型相关的**：`RAPL_Package0_PKG`、`\_TZ.TZ01` 之类必须运行时探测，不能写死。
+- **ADL（GPU 温度）实测失败并如实显示**：`atiadlxx.dll` 能加载、Overdrive5/6 温度接口都存在，
+  但本机核显（Radeon 780M）取不到值 → 面板显示「未实现」，不做假数据。
+- **PowerShell 取电池设计容量必须用投影查询**：`Get-CimInstance ... -ClassName BatteryStaticData`
+  不带 `-Property` 会报「常规故障」，带 `-Property DesignedCapacity` 才返回值
+  （等价于 C# 的 `SELECT DesignedCapacity FROM ...`）——这正是把「设计容量」误判成"需要管理员"的原因。
+- **不引入内核驱动**：WinRing0 在微软易受攻击驱动黑名单里；CPU die 温度、主板/VRM/内存温度
+  一律标注为「不支持」，需要时由用户自行运行 LibreHardwareMonitor。
+
+### 说明
+
+- exe 体积约 86 KB → 约 109 KB（新增传感器层）
+- `build/build.ps1` 现在编译两个源文件（`OpenMIFS.cs` + `Sensors.cs`），BOM 检查覆盖全部源码
+- 传感器**不需要管理员权限**（PDH / ACPI 热区 / WMI 普通用户可读）；
+  只有磁盘温度（`MSFT_StorageReliabilityCounter`）需要，exe 本身已提权
+
 ## [0.2.1] - 2026-10-03
 
 ### 新增

@@ -243,8 +243,9 @@ MIFS 的 14 个功能号里**没有任何一个**涉及充电上限。
 | 文件 | 作用 |
 | :--- | :--- |
 | `%LOCALAPPDATA%\OpenMIFS\openmifs.log` | 诊断日志，每个动作一行；>1 MB 轮转为 `openmifs.log.1` |
-| `%LOCALAPPDATA%\OpenMIFS\capabilities.txt` | 能力探测缓存（目前只有可写开关 `fanboost=supported\|unsupported\|unknown`） |
+| `%LOCALAPPDATA%\OpenMIFS\capabilities.txt` | 能力探测缓存（可写开关 `fanboost=supported\|unsupported\|unknown`） |
 | `%LOCALAPPDATA%\OpenMIFS\osd-diagnose.txt` | OSD 诊断输出 |
+| `%LOCALAPPDATA%\OpenMIFS\sensors-probe.txt` | 传感器探测输出（0.3.0 起，`OpenMIFS.exe --sensors`） |
 
 日志行格式（首次创建写 UTF-8 BOM，之后追加不带 BOM）：
 
@@ -264,9 +265,24 @@ MIFS 的 SET 不返回执行结果：调用了 `MiInterface(251)` 不抛异常�
 
 ---
 
-## 10. OSD（Fn 屏幕提示）与 MIFS 的关系
+## 10. 传感器不走 MIFS
 
-厂商自带的 OSD（`C:\Program Files\OSD\`，服务 `BLDHotKeyService` +
+CPU 功耗、温度、GPU、内存、磁盘这些**不经过 MIFS WMI**：它们来自 Windows 自带的
+性能计数器（PDH）与 WMI 存储/内存类，所以不需要管理员、也不受功能号表限制。
+
+MIFS 里跟传感器沾边的只有两个功能号，而且**本机都是死的**：
+
+| 功能号 | 名称 | 本机实测 |
+| :---: | :--- | :--- |
+| 22 | CPU_THERMOMETER | 调用成功但恒返回 0（未实现） |
+| 23 | CPU_POWER | 调用成功但恒返回 0（未实现） |
+
+所以 CPU 温度/功耗是用 PDH 拿的（`\Thermal Zone Information` 与 `\Energy Meter`），
+详见 [SENSORS.md](SENSORS.md)。
+
+---
+
+## 11. OSD（Fn 屏幕提示）与 MIFS 的关系厂商自带的 OSD（`C:\Program Files\OSD\`，服务 `BLDHotKeyService` +
 界面进程 `BLDFnHotkeyUtility.exe`）**不走 MIFS WMI**，它有自己的 EC 访问通道，
 具体细节见 [OSD.md](OSD.md)。
 
