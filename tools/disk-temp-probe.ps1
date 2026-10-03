@@ -1,24 +1,27 @@
 ﻿<#
   磁盘温度读取探针（只读，需要管理员）
   ==================================================================
-  目的：把「磁盘温度读不到」这件事一次问清 —— 是平台不暴露，还是我们的调用方式不对。
+  这块盘（YMTC PC300 / stornvme）目前在 OpenMIFS 里读不到温度，多条通道都返回
+  err=1（ERROR_INVALID_FUNCTION）。本探针把"还能怀疑的几种原因"一次问完：
 
-  依次尝试 5 条通道，每条打印 Win32 错误码：
-    1. IOCTL_STORAGE_QUERY_PROPERTY + StorageDeviceTemperatureProperty(22)     ← 主要给 ATA/SATA
-    2. IOCTL_STORAGE_QUERY_PROPERTY + StorageAdapterTemperatureProperty(21)
-    3. IOCTL_STORAGE_QUERY_PROPERTY + StorageDeviceProtocolSpecificProperty(20) ← NVMe 健康日志（正路）
-    4. 同上但走适配器句柄 \\.\Scsi0: + StorageAdapterProtocolSpecificProperty(19)
-    5. WMI：MSFT_StorageReliabilityCounter 实例数与内容
+    0) 属性 0（StorageDeviceProperty）自检 —— 每块盘都必须支持。
+       这一步要是也失败，说明是"IOCTL 管道/环境"问题（比如安全软件拦截），
+       而不是"NVMe 温度不被支持"。
+    1) 温度属性 22 / 21（NVMe 通常不支持，返回 err=1 属正常）
+    2) 协议专用 20（设备 → NVMe 健康日志，只读）
+    3) 协议专用 20（同上，但用 GENERIC_READ|GENERIC_WRITE 打开）
+    4) 协议专用 20（两步法：先问需要多大缓冲区，再正式读）
+    5) 协议专用 19（StorPort 适配器接口，只读 / 读写各试一次）
+    6) WMI 可靠性计数器实例数
+    7) Get-StorageReliabilityCounter 对照
 
   判读
-    · 通道 3 成功 → 是 OpenMIFS 的实现问题，把输出发我即可修
-    · 全部 err=1（ERROR_INVALID_FUNCTION）→ 这块盘/驱动组合不向用户态暴露温度，
-      到此为止，OpenMIFS 会如实显示「未实现」并写明原因
-  常见错误码
-    1    ERROR_INVALID_FUNCTION   请求的功能不被支持
-    5    ERROR_ACCESS_DENIED      没提权
-    87   ERROR_INVALID_PARAMETER  参数/结构不对
-    122  ERROR_INSUFFICIENT_BUFFER 缓冲区太小（需要先问大小）
+    · 第 0 步成功 + 其余全 err=1 → 该盘/驱动不向用户态暴露温度（平台限制），到此为止
+    · 第 0 步也失败 → 是环境问题（安全软件/过滤驱动），需要另想办法
+    · 任意一条成功 → 把输出发我，照它改进 OpenMIFS
+
+  错误码：1=ERROR_INVALID_FUNCTION  5=ERROR_ACCESS_DENIED
+          87=ERROR_INVALID_PARAMETER  122=ERROR_INSUFFICIENT_BUFFER
 
   用法：管理员 PowerShell
     powershell -ExecutionPolicy Bypass -File tools\disk-temp-probe.ps1
@@ -33,7 +36,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class DiskTempProbe {
-    const uint GENERIC_READ = 0x80000000;
+    const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
     const uint OPEN_EXISTING = 3;
     const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x2D1400;
@@ -45,12 +48,8 @@ public static class DiskTempProbe {
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CloseHandle(IntPtr h);
 
-    // ── 枚举 StorPort 适配器设备接口（GUID_DEVINTERFACE_STORAGEPORT）
-    // NVMe 的协议专用查询在真实工具里是对"适配器"设备发的，而适配器路径要靠 SetupAPI 枚举拿到，
-    // 而不是猜 \\.\Scsi0:。
     [StructLayout(LayoutKind.Sequential)]
     struct SP_DEVICE_INTERFACE_DATA { public uint cbSize; public Guid InterfaceClassGuid; public uint Flags; public IntPtr Reserved; }
-
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern IntPtr SetupDiGetClassDevsW(ref Guid classGuid, IntPtr enumerator, IntPtr hwndParent, uint flags);
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -60,9 +59,6 @@ public static class DiskTempProbe {
     [DllImport("setupapi.dll", SetLastError = true)]
     static extern bool SetupDiDestroyDeviceInfoList(IntPtr h);
 
-    // 注意：GUID 必须是方法内的局部变量（静态只读字段不能按 ref 传递）
-
-    /// <summary>返回所有 StorPort 适配器设备路径（如 \\?\scsi#...#{...}）</summary>
     public static string[] StorportAdapters() {
         var list = new System.Collections.Generic.List<string>();
         Guid guid = new Guid("2accfe60-c130-11d2-b082-00a0c91efb8b");   // GUID_DEVINTERFACE_STORAGEPORT
@@ -73,11 +69,10 @@ public static class DiskTempProbe {
             did.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA));
             uint i = 0;
             while (SetupDiEnumDeviceInterfaces(h, IntPtr.Zero, ref guid, i, ref did)) {
-                uint need = 0;
-                int detailSize = IntPtr.Size == 8 ? 8 : 6;   // SP_DEVICE_INTERFACE_DETAIL_DATA 的 cbSize
                 IntPtr detail = Marshal.AllocHGlobal(1024);
                 try {
-                    Marshal.WriteInt32(detail, detailSize);
+                    Marshal.WriteInt32(detail, IntPtr.Size == 8 ? 8 : 6);
+                    uint need = 0;
                     if (SetupDiGetDeviceInterfaceDetailW(h, ref did, detail, 1024, out need, IntPtr.Zero))
                         list.Add(Marshal.PtrToStringUni(new IntPtr(detail.ToInt64() + 4)));
                 } finally { Marshal.FreeHGlobal(detail); }
@@ -87,16 +82,42 @@ public static class DiskTempProbe {
         return list.ToArray();
     }
 
-    static IntPtr Open(string path, out int err) {
-        IntPtr h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+    static IntPtr Open(string path, uint access, out int err) {
+        IntPtr h = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
         err = (h == new IntPtr(-1)) ? Marshal.GetLastWin32Error() : 0;
         return h;
     }
 
-    /// <summary>温度属性（property 21/22）：返回 温度 或 -1，err 出参带错误码</summary>
-    public static string Temperature(string path, int propertyId, out int err) {
-        err = 0;
-        IntPtr h = Open(path, out err);
+    /// <summary>属性 0 自检：拿到型号字符串 = IOCTL 管道正常</summary>
+    public static string DeviceProperty(string path) {
+        int err = 0;
+        IntPtr h = Open(path, GENERIC_READ, out err);
+        if (h == new IntPtr(-1)) return "打不开（err=" + err + "）";
+        IntPtr inBuf = IntPtr.Zero, outBuf = IntPtr.Zero;
+        try {
+            inBuf = Marshal.AllocHGlobal(16); outBuf = Marshal.AllocHGlobal(1024);
+            for (int i = 0; i < 16; i++) Marshal.WriteByte(inBuf, i, 0);
+            for (int i = 0; i < 1024; i++) Marshal.WriteByte(outBuf, i, 0);
+            Marshal.WriteInt32(inBuf, 0, 0);   // StorageDeviceProperty
+            Marshal.WriteInt32(inBuf, 4, 0);
+            uint ret = 0;
+            if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, inBuf, 16, outBuf, 1024, out ret, IntPtr.Zero))
+                return "失败 err=" + Marshal.GetLastWin32Error();
+            int vOff = Marshal.ReadInt32(outBuf, 12), pOff = Marshal.ReadInt32(outBuf, 16);
+            string vendor = vOff > 0 ? Marshal.PtrToStringAnsi(new IntPtr(outBuf.ToInt64() + vOff)) : "";
+            string product = pOff > 0 ? Marshal.PtrToStringAnsi(new IntPtr(outBuf.ToInt64() + pOff)) : "";
+            return "成功 型号=" + (vendor + " " + product).Trim() + "（返回 " + ret + " 字节）";
+        } finally {
+            if (inBuf != IntPtr.Zero) Marshal.FreeHGlobal(inBuf);
+            if (outBuf != IntPtr.Zero) Marshal.FreeHGlobal(outBuf);
+            CloseHandle(h);
+        }
+    }
+
+    /// <summary>温度属性（21/22）</summary>
+    public static string Temperature(string path, int propertyId) {
+        int err = 0;
+        IntPtr h = Open(path, GENERIC_READ, out err);
         if (h == new IntPtr(-1)) return "打不开（err=" + err + "）";
         IntPtr inBuf = IntPtr.Zero, outBuf = IntPtr.Zero;
         try {
@@ -106,14 +127,12 @@ public static class DiskTempProbe {
             Marshal.WriteInt32(inBuf, 0, propertyId);
             Marshal.WriteInt32(inBuf, 4, 0);
             uint ret = 0;
-            if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, inBuf, 16, outBuf, 1024, out ret, IntPtr.Zero)) {
-                err = Marshal.GetLastWin32Error();
-                return "失败 err=" + err;
-            }
+            if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, inBuf, 16, outBuf, 1024, out ret, IntPtr.Zero))
+                return "失败 err=" + Marshal.GetLastWin32Error();
             int infoCount = Marshal.ReadInt16(outBuf, 12);
-            short raw = Marshal.ReadInt16(outBuf, 24 + 2);
+            short raw = Marshal.ReadInt16(outBuf, 26);
             int t = raw; if (t > 200) t = (int)Math.Round(t - 273.15);
-            return "成功 InfoCount=" + infoCount + " 原始=" + raw + " → " + t + " ℃（返回 " + ret + " 字节）";
+            return "成功 InfoCount=" + infoCount + " 原始=" + raw + " → " + t + " ℃";
         } finally {
             if (inBuf != IntPtr.Zero) Marshal.FreeHGlobal(inBuf);
             if (outBuf != IntPtr.Zero) Marshal.FreeHGlobal(outBuf);
@@ -121,13 +140,14 @@ public static class DiskTempProbe {
         }
     }
 
-    /// <summary>协议专用查询：propertyId 19（适配器）/ 20（设备）；err 出参带错误码</summary>
-    public static string ProtocolSpecific(string path, int propertyId, out int err) {
-        err = 0;
-        IntPtr h = Open(path, out err);
-        if (h == new IntPtr(-1)) return "打不开（err=" + err + "）";
+    /// <summary>协议专用查询：propertyId 19（适配器）/ 20（设备）
+    /// writeAccess=true 用 GENERIC_READ|GENERIC_WRITE 打开；twoStep=true 先问缓冲区大小再读</summary>
+    public static string ProtocolSpecific(string path, int propertyId, bool writeAccess, bool twoStep) {
         const int QuerySize = 12, ProtoSize = 40, DataSize = 512;
         int total = QuerySize + ProtoSize + DataSize;
+        int err = 0;
+        IntPtr h = Open(path, writeAccess ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ, out err);
+        if (h == new IntPtr(-1)) return "打不开（err=" + err + "，" + (writeAccess ? "读写" : "只读") + "）";
         IntPtr buf = IntPtr.Zero;
         try {
             buf = Marshal.AllocHGlobal(total);
@@ -135,22 +155,33 @@ public static class DiskTempProbe {
             Marshal.WriteInt32(buf, 0, propertyId);
             Marshal.WriteInt32(buf, 4, 0);
             int p = QuerySize;
-            Marshal.WriteInt32(buf, p + 0, 3);          // ProtocolTypeNvme
-            Marshal.WriteInt32(buf, p + 4, 2);          // NVMeDataTypeLogPage
-            Marshal.WriteInt32(buf, p + 8, 0x02);       // NVMe Health Info
+            Marshal.WriteInt32(buf, p + 0, 3);            // ProtocolTypeNvme
+            Marshal.WriteInt32(buf, p + 4, 2);            // NVMeDataTypeLogPage
+            Marshal.WriteInt32(buf, p + 8, 0x02);         // NVMe Health Info
             Marshal.WriteInt32(buf, p + 12, 0);
-            Marshal.WriteInt32(buf, p + 16, ProtoSize); // ProtocolDataOffset
-            Marshal.WriteInt32(buf, p + 20, DataSize);  // ProtocolDataLength
+            Marshal.WriteInt32(buf, p + 16, ProtoSize);   // ProtocolDataOffset
+            Marshal.WriteInt32(buf, p + 20, twoStep ? 0 : DataSize);
             uint ret = 0;
-            if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, buf, (uint)total, buf, (uint)total, out ret, IntPtr.Zero)) {
-                err = Marshal.GetLastWin32Error();
-                return "失败 err=" + err;
+
+            string step = "";
+            if (twoStep) {
+                bool ok1 = DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, buf, (uint)total, buf, (uint)total, out ret, IntPtr.Zero);
+                int err1 = Marshal.GetLastWin32Error();
+                int need = Marshal.ReadInt32(buf, p + 20);
+                step = "两步[第1步 " + (ok1 ? "成功" : "err=" + err1) + " 需要=" + need + "] ";
+                if (!ok1 && err1 != 122 && err1 != 234) return step + "→ 放弃（err=" + err1 + "）";
+                Marshal.WriteInt32(buf, p + 20, DataSize);
+                for (int i = QuerySize + ProtoSize; i < total; i++) Marshal.WriteByte(buf, i, 0);
             }
+
+            if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, buf, (uint)total, buf, (uint)total, out ret, IntPtr.Zero))
+                return step + "失败 err=" + Marshal.GetLastWin32Error();
+
             int off = QuerySize + ProtoSize;
             int kelvin = (int)Marshal.ReadByte(buf, off + 1) | ((int)Marshal.ReadByte(buf, off + 2) << 8);
             int crit = Marshal.ReadByte(buf, off + 0);
             int t = kelvin > 0 ? (int)Math.Round(kelvin - 273.15) : 0;
-            return "成功 温度=" + t + " ℃（原始 " + kelvin + " K，critical_warning=" + crit + "，返回 " + ret + " 字节）";
+            return step + "成功 温度=" + t + " ℃（原始 " + kelvin + " K，critical_warning=" + crit + "，返回 " + ret + " 字节）";
         } finally {
             if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
             CloseHandle(h);
@@ -163,57 +194,52 @@ Write-Host ''
 Write-Host '===== 磁盘温度通道探针 =====' -ForegroundColor Cyan
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 Write-Host ("管理员权限 : {0}" -f $(if ($isAdmin) { '是' } else { '否（很多通道会 err=5）' }))
-
 $disk = "\\.\PhysicalDrive$DriveIndex"
 Write-Host ("设备路径   : {0}" -f $disk)
 Write-Host ''
 
-function Try-One($title, $scriptBlock) {
-    $err = 0
-    $r = & $scriptBlock $err
-    Write-Host ("  {0,-58} {1}" -f $title, $r)
-}
+function Show($title, $value) { Write-Host ("  {0,-54} {1}" -f $title, $value) }
 
-Try-One '1) 温度属性 22（StorageDeviceTemperature）'   { param($e) [DiskTempProbe]::Temperature($disk, 22, [ref]$e) }
-Try-One '2) 温度属性 21（StorageAdapterTemperature）'  { param($e) [DiskTempProbe]::Temperature($disk, 21, [ref]$e) }
-Try-One '3) 协议专用 20（设备 → NVMe 健康日志）'      { param($e) [DiskTempProbe]::ProtocolSpecific($disk, 20, [ref]$e) }
-Try-One '4) 协议专用 19（适配器句柄 \\.\Scsi0:）'      { param($e) [DiskTempProbe]::ProtocolSpecific('\\.\Scsi0:', 19, [ref]$e) }
-
-# 真实工具（smartctl / CrystalDiskInfo 这类）对 NVMe 是向"StorPort 适配器设备接口"发协议专用查询，
-# 适配器路径要枚举 GUID_DEVINTERFACE_STORAGEPORT 拿到，不能靠猜。
-$adapters = [DiskTempProbe]::StorportAdapters()
-$n = 5
+Show '0) 属性 0 自检（StorageDeviceProperty，必须成功）' ([DiskTempProbe]::DeviceProperty($disk))
 Write-Host ''
+Show '1) 温度属性 22（StorageDeviceTemperature）'   ([DiskTempProbe]::Temperature($disk, 22))
+Show '2) 温度属性 21（StorageAdapterTemperature）'  ([DiskTempProbe]::Temperature($disk, 21))
+Show '3) 协议专用 20（设备，只读）'                  ([DiskTempProbe]::ProtocolSpecific($disk, 20, $false, $false))
+Show '4) 协议专用 20（设备，读写权限）'              ([DiskTempProbe]::ProtocolSpecific($disk, 20, $true, $false))
+Show '5) 协议专用 20（设备，两步法）'                ([DiskTempProbe]::ProtocolSpecific($disk, 20, $false, $true))
+Write-Host ''
+
+$adapters = [DiskTempProbe]::StorportAdapters()
 Write-Host ("  找到 {0} 个 StorPort 适配器接口" -f $adapters.Count)
+$n = 6
 foreach ($a in $adapters) {
     $short = $a
-    if ($short.Length -gt 40) { $short = $short.Substring(0, 40) + '…' }
-    Try-One ("{0}) 协议专用 19（StorPort 适配器 {1}）" -f $n, $short) { param($e) [DiskTempProbe]::ProtocolSpecific($a, 19, [ref]$e) }
+    if ($short.Length -gt 30) { $short = $short.Substring(0, 30) + '…' }
+    Show ("{0}) StorPort 适配器 19（只读，{1}）" -f $n, $short) ([DiskTempProbe]::ProtocolSpecific($a, 19, $false, $false))
+    $n++
+    Show ("{0}) StorPort 适配器 19（读写，{1}）" -f $n, $short) ([DiskTempProbe]::ProtocolSpecific($a, 19, $true, $false))
     $n++
 }
 
 Write-Host ''
-Write-Host '6) WMI：MSFT_StorageReliabilityCounter'
+Write-Host '7) WMI：MSFT_StorageReliabilityCounter'
 try {
     $rel = @(Get-CimInstance -Namespace root/Microsoft/Windows/Storage -ClassName MSFT_StorageReliabilityCounter -ErrorAction Stop)
     Write-Host ("   实例数 = {0}" -f $rel.Count)
-    $rel | Select-Object DeviceId,Temperature,TemperatureMax,Wear,PowerOnHours,ReadErrorsTotal | Format-Table -AutoSize
-} catch {
-    Write-Host ("   查询失败：{0}" -f $_.Exception.Message) -ForegroundColor Yellow
-}
-Write-Host '7) 对照：Get-StorageReliabilityCounter'
+    $rel | Select-Object DeviceId, Temperature, Wear, PowerOnHours | Format-Table -AutoSize
+} catch { Write-Host ("   查询失败：{0}" -f $_.Exception.Message) -ForegroundColor Yellow }
+
+Write-Host '8) 对照：Get-StorageReliabilityCounter'
 try {
     Get-PhysicalDisk | ForEach-Object {
         $c = $_ | Get-StorageReliabilityCounter -ErrorAction Stop
         Write-Host ("   {0} → 温度={1} 磨损={2} 通电={3} h" -f $_.FriendlyName, $c.Temperature, $c.Wear, $c.PowerOnHours)
     }
-} catch {
-    Write-Host ("   失败：{0}" -f $_.Exception.Message) -ForegroundColor Yellow
-}
+} catch { Write-Host ("   失败：{0}" -f $_.Exception.Message) -ForegroundColor Yellow }
 
 Write-Host ''
 Write-Host '判读：'
-Write-Host '  · 通道 3 或 StorPort 适配器通道成功 → OpenMIFS 的实现问题，把输出发我'
-Write-Host '  · 全部 err=1（ERROR_INVALID_FUNCTION）→ 该盘/驱动不向用户态暴露温度，到此为止' -ForegroundColor Yellow
-Write-Host '  · err=5 → 提权后重跑；err=87 → 参数结构有问题（把输出发我）' -ForegroundColor Yellow
+Write-Host '  · 第 0 步成功 + 其余全 err=1 → 该盘/驱动不向用户态暴露温度（平台限制），到此为止'
+Write-Host '  · 第 0 步也失败 → 是环境问题（安全软件/过滤驱动拦截），不是 NVMe 本身'
+Write-Host '  · 任意一条成功 → 把输出发我，照它改 OpenMIFS'
 Write-Host ''
