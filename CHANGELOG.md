@@ -15,6 +15,29 @@
 - 记下一条可复用的判据规矩：凡"写入是否真的生效"，都要找一个**独立于寄存器镜像的物理量**
   （风扇看转速、性能模式看实测性能百分比、充电看实际注入电量）—— 这次误判就是只看了寄存器镜像
 
+## [0.4.3] - 2026-10-03
+
+### 修复（磁盘温度读不到的真因）
+
+- **`STORAGE_PROPERTY_ID` 不是连续枚举，我之前按连续编号推测，四个属性 ID 全部偏低 30**：
+  官方头文件在 `StorageDeviceIoCapabilityProperty` 处**显式跳到 48**（reserved 占位），
+  之后才是 49/50/51/52。发给驱动的属性 ID 是未定义值 → 一律返回 `ERROR_INVALID_FUNCTION`(1)。
+
+  | 属性 | 旧（错） | 新（对） |
+  | :--- | :---: | :---: |
+  | `StorageAdapterProtocolSpecificProperty` | 19 | **49**（`0x31`，smartctl 源码同值） |
+  | `StorageDeviceProtocolSpecificProperty` | 20 | **50** |
+  | `StorageAdapterTemperatureProperty` | 21 | **51** |
+  | `StorageDeviceTemperatureProperty` | 22 | **52** |
+
+- 依据：[STORAGE_PROPERTY_ID 官方枚举](https://learn.microsoft.com/zh-cn/windows/win32/api/winioctl/ne-winioctl-storage_property_id)
+  （页面上 `StorageDeviceIoCapabilityProperty:48`、`StorageDeviceSelfEncryptionProperty:64` 是显式锚点）
+- 反证来自用户实测：**CrystalDiskInfo 9.2.3 能读到这块盘 35 ℃** —— 说明平台暴露温度，是调用方的问题
+- `tools/disk-temp-probe.ps1` 同步改为正确属性 ID（52/51/50/49）
+
+> 复盘：这次绕了 4 轮，根因是"按直觉补枚举"。教训 —— 涉及 Win32 枚举值，
+> **必须查官方头文件/文档里的显式锚点**，不能靠"第几个字段就是第几个值"。
+
 ## [0.4.2] - 2026-10-03
 
 ### 新增 / 诊断

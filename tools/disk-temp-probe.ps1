@@ -7,11 +7,11 @@
     0) 属性 0（StorageDeviceProperty）自检 —— 每块盘都必须支持。
        这一步要是也失败，说明是"IOCTL 管道/环境"问题（比如安全软件拦截），
        而不是"NVMe 温度不被支持"。
-    1) 温度属性 22 / 21（NVMe 通常不支持，返回 err=1 属正常）
-    2) 协议专用 20（设备 → NVMe 健康日志，只读）
-    3) 协议专用 20（同上，但用 GENERIC_READ|GENERIC_WRITE 打开）
-    4) 协议专用 20（两步法：先问需要多大缓冲区，再正式读）
-    5) 协议专用 19（StorPort 适配器接口，只读 / 读写各试一次）
+    1) 温度属性 52 / 51（官方枚举值；注意不是 22/21 —— 该枚举中间有跳值）
+    2) 协议专用 50（设备 → NVMe 健康日志，只读）
+    3) 协议专用 50（同上，但用 GENERIC_READ|GENERIC_WRITE 打开）
+    4) 协议专用 50（两步法：先问需要多大缓冲区，再正式读）
+    5) 协议专用 49（StorPort 适配器接口，只读 / 读写各试一次）
     6) WMI 可靠性计数器实例数
     7) Get-StorageReliabilityCounter 对照
 
@@ -19,6 +19,8 @@
     · 第 0 步成功 + 其余全 err=1 → 该盘/驱动不向用户态暴露温度（平台限制），到此为止
     · 第 0 步也失败 → 是环境问题（安全软件/过滤驱动），需要另想办法
     · 任意一条成功 → 把输出发我，照它改进 OpenMIFS
+  注意：属性 ID 用的是官方枚举值（温度 52/51、协议专用 50/49）。早先版本误用 22/21/20/19
+  （该枚举在 StorageDeviceIoCapabilityProperty 处跳到 48），所以拿到的是 err=1。
 
   错误码：1=ERROR_INVALID_FUNCTION  5=ERROR_ACCESS_DENIED
           87=ERROR_INVALID_PARAMETER  122=ERROR_INSUFFICIENT_BUFFER
@@ -202,11 +204,11 @@ function Show($title, $value) { Write-Host ("  {0,-54} {1}" -f $title, $value) }
 
 Show '0) 属性 0 自检（StorageDeviceProperty，必须成功）' ([DiskTempProbe]::DeviceProperty($disk))
 Write-Host ''
-Show '1) 温度属性 22（StorageDeviceTemperature）'   ([DiskTempProbe]::Temperature($disk, 22))
-Show '2) 温度属性 21（StorageAdapterTemperature）'  ([DiskTempProbe]::Temperature($disk, 21))
-Show '3) 协议专用 20（设备，只读）'                  ([DiskTempProbe]::ProtocolSpecific($disk, 20, $false, $false))
-Show '4) 协议专用 20（设备，读写权限）'              ([DiskTempProbe]::ProtocolSpecific($disk, 20, $true, $false))
-Show '5) 协议专用 20（设备，两步法）'                ([DiskTempProbe]::ProtocolSpecific($disk, 20, $false, $true))
+Show '1) 温度属性 52（StorageDeviceTemperature）'   ([DiskTempProbe]::Temperature($disk, 52))
+Show '2) 温度属性 51（StorageAdapterTemperature）'  ([DiskTempProbe]::Temperature($disk, 51))
+Show '3) 协议专用 50（设备，只读）'                  ([DiskTempProbe]::ProtocolSpecific($disk, 50, $false, $false))
+Show '4) 协议专用 50（设备，读写权限）'              ([DiskTempProbe]::ProtocolSpecific($disk, 50, $true, $false))
+Show '5) 协议专用 50（设备，两步法）'                ([DiskTempProbe]::ProtocolSpecific($disk, 50, $false, $true))
 Write-Host ''
 
 $adapters = [DiskTempProbe]::StorportAdapters()
@@ -215,9 +217,9 @@ $n = 6
 foreach ($a in $adapters) {
     $short = $a
     if ($short.Length -gt 30) { $short = $short.Substring(0, 30) + '…' }
-    Show ("{0}) StorPort 适配器 19（只读，{1}）" -f $n, $short) ([DiskTempProbe]::ProtocolSpecific($a, 19, $false, $false))
+    Show ("{0}) StorPort 适配器 49（只读，{1}）" -f $n, $short) ([DiskTempProbe]::ProtocolSpecific($a, 49, $false, $false))
     $n++
-    Show ("{0}) StorPort 适配器 19（读写，{1}）" -f $n, $short) ([DiskTempProbe]::ProtocolSpecific($a, 19, $true, $false))
+    Show ("{0}) StorPort 适配器 49（读写，{1}）" -f $n, $short) ([DiskTempProbe]::ProtocolSpecific($a, 49, $true, $false))
     $n++
 }
 

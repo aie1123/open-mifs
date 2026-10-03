@@ -861,8 +861,12 @@ namespace OpenMIFS
         private const uint FILE_SHARE_WRITE = 2;
         private const uint OPEN_EXISTING = 3;
         private const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x2D1400;
-        private const int StorageAdapterTemperatureProperty = 21;
-        private const int StorageDeviceTemperatureProperty = 22;
+        // 注意：STORAGE_PROPERTY_ID 不是连续枚举！官方头文件在 StorageDeviceIoCapabilityProperty 处
+        // 显式跳到了 48（reserved 值占位），之后才依次是 49/50/51/52。
+        // 按连续编号推测会全部偏低 30 → 驱动收到未定义属性 → 一律返回 ERROR_INVALID_FUNCTION(1)。
+        // 这正是 OpenMIFS 0.4.0~0.4.2 读不到磁盘温度的原因（CrystalDiskInfo 能读到 35 ℃ 即为反证）。
+        private const int StorageAdapterTemperatureProperty = 51;
+        private const int StorageDeviceTemperatureProperty = 52;
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr templ);
@@ -939,7 +943,7 @@ namespace OpenMIFS
 
         // ─────────────── NVMe 专用通道：IOCTL_STORAGE_QUERY_PROPERTY + NVMe 健康日志（SMART/Health, log page 0x02）
         // Windows 上读 NVMe 温度最通用的一条路（磁盘工具普遍用它）：健康日志第 1~2 字节是开尔文温度。
-        private const int StorageDeviceProtocolSpecificProperty = 20;
+        private const int StorageDeviceProtocolSpecificProperty = 50;
         private const int ProtocolTypeNvme = 3;
         private const int NvmeDataTypeLogPage = 2;
         private const int NvmeLogPageHealthInfo = 0x02;
@@ -1001,7 +1005,7 @@ namespace OpenMIFS
             return null;
         }
 
-        private const int StorageAdapterProtocolSpecificProperty = 19;
+        private const int StorageAdapterProtocolSpecificProperty = 49;
 
         /// <summary>协议专用查询的公共实现（设备通道与适配器通道共用）。</summary>
         private static int? ProtocolSpecificTemperature(string path, int propertyId, List<string> why, string tag)
