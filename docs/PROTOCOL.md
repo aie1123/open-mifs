@@ -1,4 +1,4 @@
-# MIFS 接口协议说明
+﻿# MIFS 接口协议说明
 
 本文记录 OpenMIFS 依赖的接口、报文格式、功能号表，以及发现过程中的坑。
 内容全部来自对公开 WMI 接口的观察 + 上游 Linux 内核驱动的公开信息，
@@ -104,9 +104,9 @@ Get-ChildItem 'HKLM:\HARDWARE\ACPI' -Recurse | ForEach-Object {
 | 16 | RGB_KB_MODE | R/W | `[4]` | `0` 关 / `1` 循环 / `2` 固定 / `3` 自定义 |
 | 17 | RGB_KB_COLOR | W | `[4..6]` | R、G、B 三字节 |
 | 18 | RGB_KB_BRIGHTNESS | R/W | `[4]` | 键盘背光亮度 |
-| 19 | SYSTEM_AC_TYPE | R | `[4]` | `1` 外接电源 / `0` 电池 |
+| 19 | SYSTEM_AC_TYPE | R | `[4]` | **`1` = Type-C(PD)，`2` = 圆口 DC**（早期写作"1 外接电源"不准确，见 §12） |
 | 20 | MAX_FAN_SWITCH | R/W | `[4][5]` | 风扇满速：参数 `[4]`=风扇组（0=CPU/GPU），`[5]`=0 正常 / 1 满速 |
-| 21 | MAX_FAN_SPEED | R | `[4]` | 风扇满速值 |
+| 21 | MAX_FAN_SPEED | R/W | `[4]` | **手动 PWM 占空比**（`20` 号打开手动控制后写这里）；取值域未公开，见 [FAN-CONTROL.md](FAN-CONTROL.md) |
 | 22 | CPU_THERMOMETER | R | `[4]` | CPU 温度（℃） |
 | 23 | CPU_POWER | R | `[4]` | CPU 功率 |
 
@@ -282,7 +282,24 @@ MIFS 里跟传感器沾边的只有两个功能号，而且**本机都是死的*
 
 ---
 
-## 11. OSD（Fn 屏幕提示）与 MIFS 的关系厂商自带的 OSD（`C:\Program Files\OSD\`，服务 `BLDHotKeyService` +
+## 11. 风扇控制与电源类型门控（0.3.4 更正）
+
+上游 `tongfang-mifs-wmi` 驱动（v9）的文档写明：
+
+- `20` MAX_FAN_SWITCH = **手动风扇控制开关**：`[4]` 风扇组（0 = CPU/GPU，1 = SYS）、`[5]` 状态（0/1）
+- `21` MAX_FAN_SPEED = **PWM 占空比**：`20` 打开手动控制后写它
+- **性能与满速模式要求圆口 DC 供电**：驱动对"电池供电"和"Type-C 供电"都返回 `EOPNOTSUPP`
+
+也就是说：**不是"这些功能没实现"，而是硬件按电源类型门控**。
+功能号 `19` 返回 `1` 表示当前是 Type-C 供电 —— 此时 EC 会忽略 `8=3`（满速模式）与 `20/21`（风扇）的写入。
+
+排查功能"写入无效"时，**必须先看 `19` 的当前值**，否则会把"电源类型限制"误判成"机型不支持"。
+
+---
+
+## 12. OSD（Fn 屏幕提示）与 MIFS 的关系
+
+厂商自带的 OSD（`C:\Program Files\OSD\`，服务 `BLDHotKeyService` +
 界面进程 `BLDFnHotkeyUtility.exe`）**不走 MIFS WMI**，它有自己的 EC 访问通道，
 具体细节见 [OSD.md](OSD.md)。
 

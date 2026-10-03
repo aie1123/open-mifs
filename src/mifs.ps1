@@ -1208,7 +1208,7 @@ function Show-Status {
 
     $ac = Get-MifsByte -Func $FNUM['AC_TYPE']
     if ($null -ne $ac) {
-        Write-Host ("供电状态   : {0}" -f $(if ([int]$ac -eq 1) { '外接电源' } elseif ([int]$ac -eq 0) { '电池供电' } else { "原始值 $ac" }))
+        Write-Host ("供电状态   : {0}" -f $(switch ([int]$ac) { 0 { '电池供电' } 1 { 'Type-C 供电（风扇满速/满速模式被硬件禁用）' } 2 { '圆口 DC 供电' } default { "原始值 $ac" } }))
     }
 
     $kbd = Get-MifsByte -Func $FNUM['RGB_BRIGHT']
@@ -1285,7 +1285,15 @@ try {
                 Write-Host '  ⚠️ 该功能号本机不可读，风扇满速很可能未实现。' -ForegroundColor Yellow
             }
             elseif ([int]$before -eq [int]$after) {
-                Write-Host '  ⚠️ 值没有变化 —— EC 忽略了这次写入，本机未实现该开关。' -ForegroundColor Yellow
+                Write-Host '  ⚠️ 值没有变化 —— EC 忽略了这次写入。' -ForegroundColor Yellow
+                $acv = Get-MifsByte -Func $FNUM['AC_TYPE']
+                if ($null -ne $acv -and [int]$acv -eq 1) {
+                    Write-Host '  ⚠️ 但注意供电类型：现在是 Type-C(PD) 供电。上游 tongfang-mifs-wmi 驱动文档写明' -ForegroundColor Yellow
+                    Write-Host '     「性能/满速模式与风扇满速在 Type-C 供电下被硬件禁用，只有圆口 DC 电源才放开」。' -ForegroundColor Yellow
+                    Write-Host '     请插上圆口电源后重试，别据此判定"本机不支持"。' -ForegroundColor Yellow
+                } else {
+                    Write-Host '  ⚠️ 供电类型不是 Type-C，可认为本机 EC 确实忽略该开关。' -ForegroundColor Yellow
+                }
             }
             else {
                 Write-Host '  ✅ 值已改变，开关生效。' -ForegroundColor Green

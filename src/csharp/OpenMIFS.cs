@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.3.3.0")]
-[assembly: AssemblyFileVersion("0.3.3.0")]
+[assembly: AssemblyVersion("0.3.4.0")]
+[assembly: AssemblyFileVersion("0.3.4.0")]
 
 namespace OpenMIFS
 {
@@ -151,6 +151,10 @@ namespace OpenMIFS
     {
         // null = 尚未检测；true/false = 实测结论
         public static bool? FanBoost;
+        // 探测时的供电类型（见 Mifs.AcTypeName）：上游驱动文档说明
+        // 「性能/满速模式在电池与 Type-C(PD) 供电下被硬件禁用」，
+        // 所以换了电源就必须重测，不能拿上次的结论跨电源状态复用。
+        public static int FanBoostAcType = -1;
 
         private static string PathName { get { return Path.Combine(Log.Folder, "capabilities.txt"); } }
 
@@ -174,8 +178,14 @@ namespace OpenMIFS
                         else if (v == "unsupported") FanBoost = false;
                         else FanBoost = null;
                     }
+                    else if (k == "fanboost_actype")
+                    {
+                        int n;
+                        if (int.TryParse(v, out n)) FanBoostAcType = n;
+                    }
                 }
-                Log.Info("加载能力缓存：" + PathName + " → 风扇满速=" + FanBoostText());
+                Log.Info("加载能力缓存：" + PathName + " → 风扇满速=" + FanBoostText()
+                    + "（测试时供电=" + Mifs.AcTypeName(FanBoostAcType) + "）");
             }
             catch (Exception ex) { Log.Ex("读取能力缓存失败", ex); }
         }
@@ -187,10 +197,18 @@ namespace OpenMIFS
                 if (!Directory.Exists(Log.Folder)) Directory.CreateDirectory(Log.Folder);
                 StringBuilder sb = new StringBuilder();
                 sb.AppendLine("# OpenMIFS 能力探测缓存（程序自动生成，删掉即视为未检测）");
+                sb.AppendLine("# fanboost_actype：探测时的供电类型（0 电池 / 1 Type-C / 2 圆口 DC）");
                 sb.AppendLine("fanboost=" + FanBoostText());
+                sb.AppendLine("fanboost_actype=" + FanBoostAcType.ToString(CultureInfo.InvariantCulture));
                 File.WriteAllText(PathName, sb.ToString(), new UTF8Encoding(false));
             }
             catch (Exception ex) { Log.Ex("写入能力缓存失败", ex); }
+        }
+
+        /// <summary>缓存结论只对"当时的供电类型"有效。</summary>
+        public static bool ValidFor(int acType)
+        {
+            return FanBoost.HasValue && FanBoostAcType == acType;
         }
 
         private static string FanBoostText()
@@ -279,6 +297,20 @@ namespace OpenMIFS
         public const int FnMaxFanSpeed   = 21;
         public const int FnCpuTemp       = 22;
         public const int FnCpuPower      = 23;
+
+        /// <summary>供电类型（功能号 19）。语义来自上游 tongfang-mifs-wmi 驱动文档：
+        /// 1 = Type-C(PD)，2 = 圆口 DC。本项目早期写成"1 外接电源"是不准确的。</summary>
+        public static string AcTypeName(int v)
+        {
+            switch (v)
+            {
+                case 0: return "电池供电";
+                case 1: return "Type-C 供电";
+                case 2: return "圆口 DC 供电";
+                case -1: return "未知";
+            }
+            return "原始值 " + v.ToString(CultureInfo.InvariantCulture);
+        }
 
         private static ManagementObject _instance;
         private static string _lastError = "";
@@ -1140,6 +1172,7 @@ namespace OpenMIFS
         private string _osdHintMode = "auto";
         private string _pendingHint;
         private bool _sensorBusy;
+        private int _acTypeNow = -1;
         private readonly Label _lblOsd = new Label();
         private readonly Button _btnOsdRestart = new Button();
         private readonly Button _btnOsdDiag = new Button();
@@ -1891,13 +1924,22 @@ namespace OpenMIFS
                 {
                     // EC 接受了命令但值没变 → 本机未实现该开关，缓存结论并禁用按钮
                     Caps.FanBoost = false;
+                    Caps.FanBoostAcType = _acTypeNow;
                     Caps.Save();
-                    Log.Warn("风扇满速：写 " + target + " 但读回 " + back.Value + " → 判定本机未实现，按钮已禁用");
+                    Log.Warn("风扇满速：写 " + target + " 但读回 " + back.Value + " → 判定不可用（当时供电="
+                        + Mifs.AcTypeName(_acTypeNow) + "）");
                     RefreshAll();
-                    Warn("本机 EC 忽略风扇满速写入（写 " + target + " 读回 " + back.Value + "），已标记为未实现并禁用该按钮。");
+                    if (_acTypeNow == 1)
+                        Warn("EC 忽略了这次写入。**但这很可能是供电类型的限制**："
+                            + "\r\n上游 tongfang-mifs-wmi 驱动文档写明：Type-C(PD) 供电下，"
+                            + "\r\n性能/满速模式与风扇满速都被硬件禁用，只有插圆口 DC 电源才放开。"
+                            + "\r\n\r\n请插上圆口电源后重试（结论会按供电类型分别记录，不会误判为「本机不支持」）。");
+                    else
+                        Warn("本机 EC 忽略风扇满速写入（写 " + target + " 读回 " + back.Value
+                            + "，供电=" + Mifs.AcTypeName(_acTypeNow) + "），已标记为不可用。");
                     return;
                 }
-                if (!Caps.FanBoost.HasValue) { Caps.FanBoost = true; Caps.Save(); }
+                if (!Caps.ValidFor(_acTypeNow)) { Caps.FanBoost = true; Caps.FanBoostAcType = _acTypeNow; Caps.Save(); }
                 RefreshAll();
                 PrimeOsdWatch();
                 ShowOsd("风扇满速 · " + (target == 1 ? "开" : "关"));
@@ -2177,17 +2219,20 @@ namespace OpenMIFS
                 sb.AppendLine("风扇转速     : 未实现");
             }
 
-            // ── 风扇满速（可写开关，靠能力缓存 + 写后读回判定）
+            // ── 风扇满速（可写开关，靠能力缓存 + 写后读回判定；结论与当时的供电类型绑定）
             bool boostReadable = false;
+            int acType = Mifs.GetByte(Mifs.FnAcType) ?? -1;
+            _acTypeNow = acType;
             int? mxs = Mifs.GetByte(Mifs.FnMaxFanSwitch);
             if (mxs.HasValue)
             {
                 boostReadable = true;
                 _fanBoostOn = mxs.Value == 1;
             }
-            if (!Caps.FanBoost.HasValue)
+            bool capsValid = Caps.ValidFor(acType);
+            if (!capsValid)
             {
-                _fanBoostUsable = boostReadable;   // 未检测：允许点一次，点后按读回结果定性
+                _fanBoostUsable = boostReadable;   // 未检测（或换了电源）：允许点一次，点后按读回结果定性
                 _btnBoost.Enabled = boostReadable;
                 _btnBoost.Text = boostReadable
                     ? "风扇满速：" + (_fanBoostOn ? "开" : "关") + "（未检测）"
@@ -2209,8 +2254,17 @@ namespace OpenMIFS
                 _btnBoost.Enabled = false;
                 _btnBoost.Text = "风扇满速：未实现";
                 _btnBoost.Font = _fontUi;
-                missing.Add("风扇满速");
-                sb.AppendLine("风扇满速     : 未实现（EC 忽略写入）");
+                if (acType == 1)
+                {
+                    // 上游驱动文档：Type-C(PD) 供电下性能/满速模式与风扇满速被硬件禁用
+                    _btnBoost.Text = "风扇满速（Type-C 供电下被禁用）";
+                    sb.AppendLine("风扇满速     : 被电源类型禁用（Type-C 供电）");
+                }
+                else
+                {
+                    missing.Add("风扇满速");
+                    sb.AppendLine("风扇满速     : 未实现（EC 忽略写入）");
+                }
             }
 
             // ── Fn 锁
@@ -2475,6 +2529,7 @@ namespace OpenMIFS
             if (_suppress) return;
             try
             {
+                int acNow = Mifs.GetByte(Mifs.FnAcType) ?? -1;
                 int? cur = Mifs.GetByte(Mifs.FnMaxFanSwitch);
                 if (!cur.HasValue) { _tray.ShowBalloonTip(4000, "OpenMIFS", "风扇满速：本机未实现", ToolTipIcon.Info); return; }
                 byte target = (byte)(cur.Value == 1 ? 0 : 1);
@@ -2485,13 +2540,16 @@ namespace OpenMIFS
                 if (back.HasValue && back.Value != target)
                 {
                     Caps.FanBoost = false;
+                    Caps.FanBoostAcType = acNow;
                     Caps.Save();
-                    Log.Warn("托盘风扇满速：写 " + target + " 读回 " + back.Value + " → 本机未实现，已禁用入口");
-                    _tray.ShowBalloonTip(5000, "OpenMIFS", "本机 EC 忽略风扇满速写入，已标记未实现。", ToolTipIcon.Warning);
+                    Log.Warn("托盘风扇满速：写 " + target + " 读回 " + back.Value + " → 不可用（供电=" + Mifs.AcTypeName(acNow) + "）");
+                    _tray.ShowBalloonTip(6000, "OpenMIFS", acNow == 1
+                        ? "EC 忽略了写入 —— Type-C 供电下风扇满速被硬件禁用，请插圆口电源后重试。"
+                        : "EC 忽略风扇满速写入，已标记为不可用。", ToolTipIcon.Warning);
                 }
                 else
                 {
-                    if (!Caps.FanBoost.HasValue) { Caps.FanBoost = true; Caps.Save(); }
+                    if (!Caps.ValidFor(acNow)) { Caps.FanBoost = true; Caps.FanBoostAcType = acNow; Caps.Save(); }
                     _form.ShowOsd("风扇满速 · " + (target == 1 ? "开" : "关"));
                 }
                 RefreshTray();
@@ -2532,8 +2590,9 @@ namespace OpenMIFS
                     _miStatus.Text = "当前：接口不可用";
                 }
 
+                int acNow2 = Mifs.GetByte(Mifs.FnAcType) ?? -1;
                 int? mxs = Mifs.GetByte(Mifs.FnMaxFanSwitch);
-                bool boostUsable = mxs.HasValue && (!Caps.FanBoost.HasValue || Caps.FanBoost.Value);
+                bool boostUsable = mxs.HasValue && (!Caps.ValidFor(acNow2) || Caps.FanBoost.Value);
                 _miFanBoost.Checked = mxs.HasValue && mxs.Value == 1;
                 _miFanBoost.Enabled = boostUsable;
                 _miFanBoost.Text = boostUsable ? "风扇满速" : "风扇满速（未实现）";
