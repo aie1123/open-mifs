@@ -1,0 +1,91 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 OpenMIFS.exe
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 脚本语法检查
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            if ($errors -and $errors.Count) {
+              $failed = $true
+              Write-Host "::error file=$($_.FullName)::$($errors[0].Message)"
+              $errors | ForEach-Object { Write-Host "  L$($_.Extent.StartLineNumber): $($_.Message)" }
+            } else {
+              Write-Host "OK  $($_.Name)"
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: 生成图标（验证生成器可用）
+        shell: pwsh
+        run: ./build/make-icon.ps1
+
+      - name: 构建 exe
+        shell: pwsh
+        run: ./build/build.ps1
+
+      - name: 记录产物信息
+        shell: pwsh
+        run: |
+          $exe = Get-Item dist/OpenMIFS.exe
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          Write-Host "文件: $($exe.FullName)"
+          Write-Host "大小: $($exe.Length) 字节"
+          Write-Host "SHA256: $hash"
+          @"
+          ## OpenMIFS 构建结果
+
+          | 项目 | 值 |
+          | :--- | :--- |
+          | 文件 | ``OpenMIFS.exe`` |
+          | 大小 | $($exe.Length) 字节 ($([math]::Round($exe.Length/1KB,1)) KB) |
+          | SHA256 | ``$hash`` |
+          | 版本 | $($exe.VersionInfo.FileVersion) |
+
+          单个 exe，无外部依赖，只要求 Windows 自带的 .NET Framework 4.8。
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenMIFS-${{ github.sha }}
+          path: dist/OpenMIFS.exe
+          if-no-files-found: error
+
+      - name: 发布 Release（仅打 tag 时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/OpenMIFS.exe
+          generate_release_notes: true
+          body: |
+            ## OpenMIFS ${{ github.ref_name }}
+
+            下载下方的 `OpenMIFS.exe`，双击运行即可（会弹出 UAC，需要管理员权限）。
+
+            - 单个 exe，无外部依赖，只要求 Windows 自带的 .NET Framework 4.8
+            - 常驻任务栏通知区域，可后台运行
+            - 首次运行建议先跑 `probe` / `test` 确认本机支持哪些功能，见 README
+
+            完整改动见 [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)。
