@@ -24,17 +24,31 @@
     .\mifs.ps1 fanboost on         风扇满速开关（本机未实现，会提示）
     .\mifs.ps1 kbd 0               键盘背光 0~3
     .\mifs.ps1 raw 19              对指定功能号发 GET，打印原始字节
+    .\mifs.ps1 osd status          OSD（Fn 屏幕提示）服务/进程状态
+    .\mifs.ps1 osd restart         重启 OSD 服务与界面进程（修复 OSD 不显示的第一招）
+    .\mifs.ps1 osd diagnose        OSD 诊断（服务/进程/安装日志/显示环境/事件日志）
+    .\mifs.ps1 osd dpi             OSD DPI 兼容修复状态（本机 OSD 进程不感知 DPI）
+    .\mifs.ps1 osd dpi-on          写入 DPI 兼容标记 ~ HIGHDPIAWARE（可撤销）
+    .\mifs.ps1 osd dpi-off         撤销 DPI 兼容标记
+    .\mifs.ps1 startup status      开机自启（计划任务 OpenMIFS）状态
+    .\mifs.ps1 startup on|off      开关开机自启（计划任务 /RL HIGHEST，登录时不弹 UAC）
+    .\mifs.ps1 log                 打印日志路径并显示最后 20 行
+
+  日志
+    与图形版共用同一份日志：%LOCALAPPDATA%\OpenMIFS\openmifs.log（超过 1 MB 自动轮转）。
 
   安全
-    status / probe / test / scan / raw  只发 GET(250)，纯读，不改任何状态。
-    mode / fanboost / kbd               是 SET(251)，会写 EC 寄存器，均为官方定义的可逆开关。
+    status / probe / test / scan / raw / osd status / osd diagnose / osd dpi / startup status / log
+                                        只读，不改任何状态。
+    mode / fanboost / kbd / osd restart / osd dpi-on|off / startup on|off
+                                        会写 EC 寄存器、注册表或计划任务，均为可逆操作。
     不要在未确认含义的情况下对未知功能号发 SET。
 #>
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status', 'probe', 'test', 'scan', 'bench', 'mode', 'fanboost', 'kbd', 'raw')]
+    [ValidateSet('status', 'probe', 'test', 'scan', 'bench', 'mode', 'fanboost', 'kbd', 'raw', 'osd', 'startup', 'log')]
     [string]$Action = 'status',
 
     [Parameter(Position = 1)]
@@ -168,6 +182,292 @@ function Set-MifsByte {
     $b = New-Object byte[] 1
     $b[0] = $Val
     Invoke-Mifs -Type $SET -Func $Func -SetPayload $b | Out-Null
+}
+
+# ──────────────────────────────── 日志（与图形版共用 %LOCALAPPDATA%\OpenMIFS\openmifs.log）
+$script:LogDir  = Join-Path $env:LOCALAPPDATA 'OpenMIFS'
+$script:LogFile = Join-Path $script:LogDir 'openmifs.log'
+
+function Write-MifsLog {
+    param([string]$Level, [string]$Message)
+    try {
+        if (-not (Test-Path $script:LogDir)) { New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null }
+        $bom = New-Object System.Text.UTF8Encoding($true)
+        $noBom = New-Object System.Text.UTF8Encoding($false)
+        # 首次创建写 BOM，否则 PowerShell 5.1 / 记事本会把中文读成乱码
+        if (-not (Test-Path $script:LogFile)) { [System.IO.File]::WriteAllText($script:LogFile, '', $bom) }
+        if ((Get-Item $script:LogFile).Length -gt 1MB) {
+            $old = "$($script:LogFile).1"
+            if (Test-Path $old) { Remove-Item $old -Force }
+            Move-Item $script:LogFile $old -Force
+            [System.IO.File]::WriteAllText($script:LogFile, '', $bom)
+        }
+        $line = '{0} [{1}] pid={2} tid={3} | (CLI) {4}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff'),
+            $Level.PadRight(5), $PID, [System.Threading.Thread]::CurrentThread.ManagedThreadId, $Message
+        [System.IO.File]::AppendAllText($script:LogFile, $line + [Environment]::NewLine, $noBom)
+    }
+    catch { }
+}
+
+# ──────────────────────────────── OSD（Fn 屏幕提示）模块
+$script:OsdService = 'BLDHotKeyService'
+$script:OsdUtility = 'BLDFnHotkeyUtility.exe'
+$script:OsdDir     = 'C:\Program Files\OSD'
+
+# DPI 兼容标记：OSD 界面进程不感知 DPI，125%/150% 缩放下分层提示可能静默画不出来。
+# 这条注册表项就是「属性 → 兼容性 → 更改高 DPI 设置」写的东西，删掉即还原。
+$script:DpiKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers'
+$script:DpiExe = Join-Path $script:OsdDir $script:OsdUtility
+$script:DpiVal = '~ HIGHDPIAWARE'
+
+function Get-OsdDpiFlag {
+    try {
+        $item = Get-ItemProperty -Path $script:DpiKey -ErrorAction SilentlyContinue
+        if ($item) {
+            $p = $item.PSObject.Properties[$script:DpiExe]
+            if ($p) { return [string]$p.Value }
+        }
+    }
+    catch { }
+    return ''
+}
+
+function Test-OsdDpiEnabled { return ((Get-OsdDpiFlag) -match 'HIGHDPIAWARE') }
+
+# 注意：powershell.exe 是 DPI 不感知进程，GetDpiForSystem / GetDpiForMonitor / Graphics.DpiX
+# 在这种进程里一律返回 96，会把 125% 缩放误报成 100%。唯一可靠的办法是拿
+# 「物理分辨率 ÷ 该进程看到的虚拟分辨率」这个比值。
+function Get-SystemDpi {
+    # ① 注册表里系统实际应用的 DPI，最准
+    try {
+        $a = (Get-ItemProperty 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name AppliedDPI -ErrorAction Stop).AppliedDPI
+        if ($a -ge 96) { return [int]$a }
+    }
+    catch { }
+    # ② 物理分辨率 ÷ 该进程看到的虚拟分辨率
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        $virt = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
+        $phys = (Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+                 Where-Object { $_.CurrentHorizontalResolution -gt 0 } |
+                 Sort-Object CurrentHorizontalResolution -Descending |
+                 Select-Object -First 1).CurrentHorizontalResolution
+        if ($virt -gt 0 -and $phys -gt 0) {
+            $pct = [math]::Round($phys / $virt * 100)
+            if ($pct -ge 100 -and $pct -le 350) { return [int][math]::Round(96 * $pct / 100) }
+        }
+    }
+    catch { }
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+        return [int][System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero).DpiX
+    }
+    catch { return 0 }
+}
+
+# schtasks / sc / taskkill 会把错误写到 stderr；在 $ErrorActionPreference='Stop' 下
+# PowerShell 5.1 会把原生命令的 stderr 当成终止性错误抛出。调用前临时改成 Continue。
+function Invoke-NativeQuiet {
+    param([string]$Exe, [string[]]$Arguments)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = & $Exe @Arguments 2>&1; $code = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    return [pscustomobject]@{ ExitCode = $code; Output = ($out | ForEach-Object { "$_" }) -join ' ' }
+}
+
+function Set-OsdDpiFlag {
+    param([bool]$Enable)
+    try {
+        if (-not (Test-Path $script:DpiKey)) { New-Item -Path $script:DpiKey -Force | Out-Null }
+        if ($Enable) {
+            New-ItemProperty -Path $script:DpiKey -Name $script:DpiExe -Value $script:DpiVal -PropertyType String -Force | Out-Null
+            Write-MifsLog 'INFO ' ("OSD DPI 兼容修复：写入 {0} = {1}" -f $script:DpiExe, $script:DpiVal)
+            Write-Host ("已写入 DPI 兼容标记：{0} = {1}" -f $script:DpiExe, $script:DpiVal) -ForegroundColor Green
+            Write-Host '下一步：.\mifs.ps1 osd restart，然后按一次 Fn 看提示是否出现。' -ForegroundColor Yellow
+            Write-Host '撤销：.\mifs.ps1 osd dpi-off' -ForegroundColor DarkGray
+        }
+        else {
+            Remove-ItemProperty -Path $script:DpiKey -Name $script:DpiExe -ErrorAction SilentlyContinue
+            Write-MifsLog 'INFO ' ("OSD DPI 兼容修复：已删除 {0} 的标记" -f $script:DpiExe)
+            Write-Host '已撤销 DPI 兼容标记（删除注册表值）。' -ForegroundColor Green
+        }
+    }
+    catch {
+        Write-MifsLog 'ERROR' ("设置 OSD DPI 兼容标记失败：{0}" -f $_.Exception.Message)
+        Write-Host ("设置失败：{0}" -f $_.Exception.Message) -ForegroundColor Red
+    }
+}
+
+function Get-OsdState {
+    $svc = Get-CimInstance Win32_Service -Filter "Name='$($script:OsdService)'" -ErrorAction SilentlyContinue
+    $procs = @(Get-CimInstance Win32_Process -Filter "Name='$($script:OsdUtility)'" -ErrorAction SilentlyContinue)
+    [pscustomobject]@{
+        Found        = [bool]$svc
+        ServiceState = if ($svc) { $svc.State } else { '未安装' }
+        ServiceStart = if ($svc) { $svc.StartMode } else { '' }
+        ServicePid   = if ($svc) { $svc.ProcessId } else { 0 }
+        ServiceSince = if ($svc -and $svc.ProcessId) {
+            try { (Get-CimInstance Win32_Process -Filter "ProcessId=$($svc.ProcessId)" -ErrorAction Stop).CreationDate } catch { $null }
+        } else { $null }
+        UtilityCount  = $procs.Count
+        UtilityPids   = ($procs | ForEach-Object { $_.ProcessId }) -join ', '
+        UtilitySince  = if ($procs.Count -gt 0) { $procs[0].CreationDate } else { $null }
+    }
+}
+
+function Show-OsdStatus {
+    Write-Host ''
+    Write-Host '===== OSD（Fn 屏幕提示）状态 =====' -ForegroundColor Cyan
+    $s = Get-OsdState
+    $svcColor = if ($s.ServiceState -eq 'Running') { 'Green' } else { 'Red' }
+    Write-Host ("服务          : {0} / {1}{2}" -f $script:OsdService, $s.ServiceState,
+        $(if ($s.ServicePid) { "  (PID $($s.ServicePid)，启动于 $($s.ServiceSince))" } else { '' })) -ForegroundColor $svcColor
+    Write-Host ("界面进程      : {0} 个{1}" -f $s.UtilityCount,
+        $(if ($s.UtilityPids) { "  (PID $($s.UtilityPids)，启动于 $($s.UtilitySince))" } else { '' })) -ForegroundColor $(if ($s.UtilityCount -gt 0) { 'Green' } else { 'Red' })
+    Write-Host ("安装目录      : {0}  {1}" -f $script:OsdDir, $(if (Test-Path $script:OsdDir) { '(存在)' } else { '(不存在！)' }))
+    $dpiOn = Test-OsdDpiEnabled
+    Write-Host ("DPI 兼容标记  : {0}" -f $(if ($dpiOn) { "已应用（$($script:DpiVal)）" } else { '未应用' })) -ForegroundColor $(if ($dpiOn) { 'Green' } else { 'DarkGray' })
+    $dpi = Get-SystemDpi
+    if ($dpi -gt 0) { Write-Host ("系统 DPI      : {0}（约 {1}% 缩放）" -f $dpi, [math]::Round($dpi / 96 * 100)) }
+    Write-Host ''
+    if ($s.ServiceState -eq 'Running' -and $s.UtilityCount -gt 0) {
+        Write-Host '服务与进程都在跑。若屏幕上仍然看不到 OSD，按顺序试：' -ForegroundColor Yellow
+        Write-Host '  .\mifs.ps1 osd diagnose     （先取证：Fn 事件到底有没有送到 OSD 进程）' -ForegroundColor Yellow
+        Write-Host '  .\mifs.ps1 osd dpi-on       （写入 DPI 兼容标记，主要嫌疑）' -ForegroundColor Yellow
+        Write-Host '  .\mifs.ps1 osd restart      （重启服务与界面进程让设置生效）' -ForegroundColor Yellow
+    }
+    Write-Host ''
+}
+
+function Invoke-OsdDiagnose {
+    Write-Host ''
+    Write-Host '===== OSD 诊断 =====' -ForegroundColor Cyan
+    $s = Get-OsdState
+    Write-Host '-- 服务 / 进程 --'
+    Write-Host ("服务          : {0} / {1}  PID={2}  启动于 {3}" -f $script:OsdService, $s.ServiceState, $s.ServicePid, $s.ServiceSince)
+    Write-Host ("界面进程      : {0} 个  PID={1}  启动于 {2}" -f $s.UtilityCount, $s.UtilityPids, $s.UtilitySince)
+    Write-Host ''
+    Write-Host '-- 安装目录 --'
+    if (Test-Path $script:OsdDir) {
+        Get-ChildItem $script:OsdDir | ForEach-Object { Write-Host ("  {0,-34} {1,10:N0} 字节  {2}" -f $_.Name, $_.Length, $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm')) }
+    }
+    else { Write-Host '  目录不存在' -ForegroundColor Red }
+    Write-Host ''
+    Write-Host '-- 服务安装日志尾部 --'
+    $ilog = Join-Path $script:OsdDir 'BLDHotKeyService.InstallLog'
+    if (Test-Path $ilog) {
+        Get-Content $ilog -Tail 12 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+    }
+    else { Write-Host '  没有 InstallLog' -ForegroundColor DarkGray }
+    Write-Host ''
+    Write-Host '-- 显示环境 / DPI --'
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    try {
+        [System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+            Write-Host ("  {0} {1}x{2} @ ({3},{4})" -f $(if ($_.Primary) { '主屏' } else { '副屏' }), $_.Bounds.Width, $_.Bounds.Height, $_.Bounds.Left, $_.Bounds.Top)
+        }
+    }
+    catch { Write-Host '  查询失败' -ForegroundColor DarkGray }
+    try {
+        $dpi = Get-SystemDpi
+        if ($dpi -gt 0) { Write-Host ("  系统 DPI    : {0}（约 {1}% 缩放）" -f $dpi, [math]::Round($dpi / 96 * 100)) }
+    }
+    catch { }
+    Write-Host ("  DPI 兼容标记: {0}" -f $(if (Test-OsdDpiEnabled) { "已应用（$($script:DpiVal)）" } else { '未应用' }))
+    Write-Host ''
+    Write-Host '-- OSD 事件投递（OSDEvents，判断 Fn 事件有没有送到 OSD 进程）--'
+    try {
+        $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'OSDEvents' } -MaxEvents 5 -ErrorAction SilentlyContinue)
+        if ($ev.Count -gt 0) {
+            Write-Host ("  最新一条    : {0}   进程 {1}" -f $ev[0].TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'), $ev[0].Properties[0].Value) -ForegroundColor Green
+            Write-Host ("  样例负载    : {0}" -f ($ev[0].Message -replace '\s+', ' '))
+            Write-Host '  判读        : 有近期条目 = Fn 事件已送达，问题在「画出来」这一步（DPI/分层窗口）。'
+        }
+        else { Write-Host '  没有 OSDEvents 条目（或该机型不用这个日志源）—— 按一次 Fn 后再跑一次对比。' -ForegroundColor DarkGray }
+    }
+    catch { Write-Host '  查询 OSDEvents 失败（可能需要管理员）' -ForegroundColor DarkGray }
+    Write-Host ''
+    Write-Host '-- 服务心跳（每 5 秒一条；停写说明服务这侧也断了）--'
+    try {
+        $hb = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'BLDHotKeyServiceEvent' } -MaxEvents 1 -ErrorAction SilentlyContinue)
+        if ($hb.Count -gt 0) { Write-Host ("  最新一条    : {0}" -f $hb[0].TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')) }
+        else { Write-Host '  没有心跳条目' -ForegroundColor DarkGray }
+    }
+    catch { Write-Host '  查询心跳失败' -ForegroundColor DarkGray }
+    Write-Host ''
+    Write-Host '完整证据（含折叠后的心跳时间范围）请用 exe 版：' -ForegroundColor Yellow
+    Write-Host '  OpenMIFS.exe --diagnose     →  %LOCALAPPDATA%\OpenMIFS\osd-diagnose.txt' -ForegroundColor Yellow
+    Write-Host ''
+}
+
+function Invoke-OsdRestart {
+    Write-Host ''
+    Write-Host '===== 重启 OSD =====' -ForegroundColor Cyan
+    Write-Host ("  sc stop {0}" -f $script:OsdService)
+    $o1 = Invoke-NativeQuiet -Exe 'sc.exe' -Arguments @('stop', $script:OsdService)
+    Write-Host ("    exit={0} {1}" -f $o1.ExitCode, $o1.Output)
+    # 必须等服务真正停稳再 start，否则会得到「服务正在停止」而启动失败
+    for ($i = 0; $i -lt 24; $i++) {
+        Start-Sleep -Milliseconds 500
+        $st = (Get-CimInstance Win32_Service -Filter "Name='$($script:OsdService)'" -ErrorAction SilentlyContinue).State
+        if ($st -and $st -notin 'Stopping', 'Running', 'Stop Pending') { break }
+    }
+    Write-Host ("  停止后状态: {0}" -f $st)
+    Write-Host ("  sc start {0}" -f $script:OsdService)
+    $o2 = Invoke-NativeQuiet -Exe 'sc.exe' -Arguments @('start', $script:OsdService)
+    Write-Host ("    exit={0} {1}" -f $o2.ExitCode, $o2.Output)
+    Write-Host ("  taskkill /IM {0} /F" -f $script:OsdUtility)
+    $o3 = Invoke-NativeQuiet -Exe 'taskkill.exe' -Arguments @('/IM', $script:OsdUtility, '/F')
+    Write-Host ("    exit={0} {1}" -f $o3.ExitCode, $o3.Output)
+    Start-Sleep -Milliseconds 1200
+    $exePath = Join-Path $script:OsdDir $script:OsdUtility
+    if (Test-Path $exePath) {
+        Start-Process -FilePath $exePath -WorkingDirectory $script:OsdDir
+        Write-Host ("  已重新启动 {0}" -f $exePath) -ForegroundColor Green
+    }
+    else { Write-Host ("  未找到 {0}" -f $exePath) -ForegroundColor Red }
+    Write-MifsLog 'INFO ' ("OSD 重启完成: stop={0} start={1} kill={2}" -f $o1.Output, $o2.Output, $o3.Output)
+    Start-Sleep -Milliseconds 800
+    Show-OsdStatus
+}
+
+# ──────────────────────────────── 开机自启（计划任务）
+function Get-StartupTask {
+    $r = Invoke-NativeQuiet -Exe 'schtasks.exe' -Arguments @('/Query', '/TN', 'OpenMIFS')
+    [pscustomobject]@{ Enabled = ($r.ExitCode -eq 0); Output = $r.Output }
+}
+
+function Set-StartupTask {
+    param([bool]$Enable)
+    $exePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'dist\OpenMIFS.exe'
+    if ($Enable -and -not (Test-Path $exePath)) {
+        throw "找不到 $exePath —— 请先构建（build\build.ps1），或用 exe 版界面里的开关"
+    }
+    if ($Enable) {
+        $r = Invoke-NativeQuiet -Exe 'schtasks.exe' -Arguments @('/Create', '/TN', 'OpenMIFS', '/TR', "`"$exePath`"",
+                '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F', '/DELAY', '0000:10')
+    }
+    else {
+        $r = Invoke-NativeQuiet -Exe 'schtasks.exe' -Arguments @('/Delete', '/TN', 'OpenMIFS', '/F')
+    }
+    $r.Output | ForEach-Object { Write-Host "  $_" }
+    Write-MifsLog 'INFO ' ("开机自启 => {0}（exit={1}）{2}" -f $(if ($Enable) { 'on' } else { 'off' }), $r.ExitCode, $r.Output)
+    if ($r.ExitCode -ne 0) { Write-Host ("设置失败（exit={0}）" -f $r.ExitCode) -ForegroundColor Red }
+    else { Write-Host ("开机自启已{0}（计划任务 OpenMIFS，/RL HIGHEST，登录时不弹 UAC）" -f $(if ($Enable) { '启用' } else { '关闭' })) -ForegroundColor Green }
+}
+
+function Show-Log {
+    Write-Host ''
+    Write-Host '===== 日志 =====' -ForegroundColor Cyan
+    Write-Host ("路径 : {0}" -f $script:LogFile)
+    if (Test-Path $script:LogFile) {
+        Write-Host ("大小 : {0:N0} 字节" -f (Get-Item $script:LogFile).Length)
+        Write-Host ''
+        Get-Content $script:LogFile -Encoding UTF8 -Tail 20 | ForEach-Object { Write-Host "  $_" }
+    }
+    else { Write-Host '（还没有日志文件 —— 运行任意动作后就会生成）' -ForegroundColor DarkGray }
+    Write-Host ''
 }
 
 # ──────────────────────────────── 动作
@@ -358,6 +658,18 @@ function Show-Status {
 
     $ct = Get-MifsByte -Func $FNUM['CPU_TEMP']
     if ($null -ne $ct) { Write-Host ("CPU 温度   : {0}" -f $(if ([int]$ct -gt 0) { "$ct ℃" } else { '未实现' })) }
+
+    try {
+        $s = Get-OsdState
+        $color = if ($s.ServiceState -eq 'Running' -and $s.UtilityCount -gt 0) { 'Gray' } else { 'Red' }
+        Write-Host ("OSD        : 服务 {0} / 界面进程 {1} 个（详见 .\mifs.ps1 osd status）" -f $s.ServiceState, $s.UtilityCount) -ForegroundColor $color
+    }
+    catch { }
+    try {
+        $t = Get-StartupTask
+        Write-Host ("开机自启   : {0}" -f $(if ($t.Enabled) { '已启用（计划任务 OpenMIFS）' } else { '未启用' }))
+    }
+    catch { }
     Write-Host ''
 }
 
@@ -383,6 +695,7 @@ try {
             Set-MifsByte -Func $FNUM['PER_MODE'] -Val ([byte]$ModeValue[$Value])
             Start-Sleep -Milliseconds 300
             Write-Host ("已发送: 切到 {0}" -f $Value) -ForegroundColor Green
+            Write-MifsLog 'INFO ' ("mode => {0}（写值 {1}），读回 {2}" -f $Value, $ModeValue[$Value], (Get-MifsByte -Func $FNUM['PER_MODE']))
             Show-Status
         }
         'fanboost' {
@@ -395,6 +708,7 @@ try {
             Start-Sleep -Milliseconds 400
             $after = Get-MifsByte -Func $FNUM['MAX_FAN_SWITCH']
             Write-Host ("已发送: 风扇满速 {0}    （写前读回={1}  写后读回={2}）" -f $Value, $before, $after) -ForegroundColor Green
+            Write-MifsLog 'INFO ' ("fanboost => {0}（写前 {1} 写后 {2}）" -f $Value, $before, $after)
             if ($null -eq $before -or $null -eq $after) {
                 Write-Host '  ⚠️ 该功能号本机不可读，风扇满速很可能未实现。' -ForegroundColor Yellow
             }
@@ -409,7 +723,28 @@ try {
             if (-not $Value) { throw 'kbd 需要 0~3' }
             Set-MifsByte -Func $FNUM['RGB_BRIGHT'] -Val ([byte][int]$Value)
             Write-Host ("已发送: 键盘背光 {0}" -f $Value) -ForegroundColor Green
+            Write-MifsLog 'INFO ' ("kbd => {0}" -f $Value)
         }
+        'osd'    {
+            switch ($Value) {
+                'status'   { Show-OsdStatus }
+                'restart'  { Invoke-OsdRestart }
+                'diagnose' { Invoke-OsdDiagnose }
+                'dpi'      { Write-Host ("DPI 兼容标记: {0}" -f $(if (Test-OsdDpiEnabled) { "已应用（$($script:DpiVal)）" } else { '未应用' })) }
+                'dpi-on'   { Set-OsdDpiFlag -Enable $true }
+                'dpi-off'  { Set-OsdDpiFlag -Enable $false }
+                default    { throw 'osd 需要 status / restart / diagnose / dpi / dpi-on / dpi-off' }
+            }
+        }
+        'startup' {
+            switch ($Value) {
+                'status' { $t = Get-StartupTask; Write-Host ("开机自启: {0}" -f $(if ($t.Enabled) { '已启用（计划任务 OpenMIFS）' } else { '未启用' })) -ForegroundColor $(if ($t.Enabled) { 'Green' } else { 'DarkGray' }) }
+                'on'     { Set-StartupTask -Enable $true }
+                'off'    { Set-StartupTask -Enable $false }
+                default  { throw 'startup 需要 status / on / off' }
+            }
+        }
+        'log'    { Show-Log }
     }
 }
 catch {

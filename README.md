@@ -11,7 +11,8 @@
 OpenMIFS 直接调用这个接口 —— 不安装任何官方组件、不加载任何驱动、不需要第三方运行库。
 
 ```
-OpenMIFS.exe        ← 下载即用，单文件 50 KB，常驻任务栏通知区域
+OpenMIFS.exe        ← 下载即用，单文件 80 KB，常驻任务栏通知区域
+OpenMIFS.exe --diagnose   ← 无界面采集 OSD 诊断证据（排障用）
 mifs-gui.cmd        ← 从源码直接跑图形界面
 mifs.cmd status     ← 从源码跑命令行版
 ```
@@ -28,6 +29,12 @@ mifs.cmd status     ← 从源码跑命令行版
 
 三种形态调用同一套接口，功能完全一致。
 
+<!-- 有截图后取消下面两行的注释（截图放 docs/screenshots/gui.png，见该目录的 README）
+
+![OpenMIFS 主界面](docs/screenshots/gui.png)
+
+-->
+
 ---
 
 ## 功能
@@ -41,14 +48,19 @@ mifs.cmd status     ← 从源码跑命令行版
 | 硬件开关 | Fn 锁、触控板锁定 |
 | 键盘背光 | 亮度 0~3 档 |
 | 风扇满速 | 一键强冷（机型支持时） |
-| 状态面板 | 供电状态、CPU 温度/功率、接口与调用方式 |
+| 启动与 OSD | 开机自启开关、OSD 状态、重启 OSD、诊断 OSD、重测功能 |
+| 状态面板 | 供电状态、CPU 温度/功率、OSD 状态、日志路径 |
 | 自动刷新 | 可调 2 / 3 / 5 / 10 秒 |
 
 exe 版本额外具备：
 
 - **常驻托盘**：关闭窗口 = 最小化到通知区域，程序继续后台运行
-- **托盘菜单**：右键托盘图标可直接切性能模式、开关风扇满速，不用打开主界面
+- **托盘菜单**：右键托盘图标可直接切性能模式、开关风扇满速、开关开机自启、打开日志
 - **托盘提示**：鼠标悬停显示当前模式与风扇转速
+- **诊断日志**：每个动作写一行到 `%LOCALAPPDATA%\OpenMIFS\openmifs.log`
+- **自带屏幕提示（替代官方 OSD）**：检测到 Fn 键改动了 EC 值，就在屏幕下方弹一条提示
+- **开机自启**：注册计划任务（`/RL HIGHEST`），登录时静默以管理员身份启动，**不会弹 UAC**
+- **能力探测**：写不进去的功能（例如本机的风扇满速）会被实测判定并**永久置灰**，不假装能用
 - **单实例保护**：重复启动会提示，不会重复占用资源
 - **自动提权**：清单里声明了 `requireAdministrator`，双击即弹 UAC，不用手动右键
 
@@ -66,10 +78,16 @@ exe 版本额外具备：
 .\src\mifs.ps1 fanboost on          # 风扇满速开关
 .\src\mifs.ps1 kbd 0                # 键盘背光 0~3
 .\src\mifs.ps1 raw 19               # 对指定功能号发 GET，打印原始字节
+.\src\mifs.ps1 osd status           # OSD（Fn 屏幕提示）服务与进程状态
+.\src\mifs.ps1 osd restart          # 重启 OSD 服务与界面进程
+.\src\mifs.ps1 osd diagnose         # OSD 诊断证据
+.\src\mifs.ps1 startup on           # 开机自启：on / off / status
+.\src\mifs.ps1 log                  # 打印日志路径 + 最后 20 行
 ```
 
-`status` / `probe` / `test` / `scan` / `raw` 只发 GET，纯读，不改任何状态。
-`mode` / `fanboost` / `kbd` 会写 EC 寄存器，都是官方定义的可逆开关。
+`status` / `probe` / `test` / `scan` / `raw` / `osd status` / `osd diagnose` / `startup status` / `log`
+只发 GET，纯读，不改任何状态。
+`mode` / `fanboost` / `kbd` / `osd restart` / `startup on|off` 会写 EC 寄存器或改计划任务，都是可逆操作。
 
 ---
 
@@ -108,6 +126,109 @@ exe 版本额外具备：
 4. **性能模式的值编码可能因机型而异。** 上游驱动标注 `0=均衡 1=性能 2=低功耗`，
    但无界 14 Pro 2023 实测是 `0=性能 1=均衡 2=低功耗`。
    映射写在 `src/mifs.ps1`、`src/mifs-gui.ps1`、`src/csharp/OpenMIFS.cs` 顶部，可自行修改。
+
+---
+
+## 诊断日志
+
+三种形态（exe / 图形脚本 / 命令行）**共用同一份日志**：
+
+```
+%LOCALAPPDATA%\OpenMIFS\openmifs.log        （超过 1 MB 自动轮转为 openmifs.log.1）
+%LOCALAPPDATA%\OpenMIFS\capabilities.txt    （能力探测缓存，删掉即重新探测）
+%LOCALAPPDATA%\OpenMIFS\osd-diagnose.txt    （OSD 诊断输出）
+```
+
+每个动作一行，带毫秒时间戳、进程号、线程号和来源标记：
+
+```
+2026-10-03 14:19:01.985 [INFO ] pid=4176 tid=1 | 首次刷新完成：接口可用=True 未实现=风扇满速、CPU 温度 OSD状态=OSD：服务 Running · 进程运行中 1 个
+2026-10-03 14:22:10.412 [INFO ] pid=4176 tid=1 | 切换性能模式 → 均衡（写 fn=8 值=1）
+2026-10-03 14:22:10.690 [INFO ] pid=4176 tid=1 | 性能模式读回 = 均衡
+```
+
+**所有写操作都会记录写后读回值** —— 这是判断「EC 到底有没有理会」的唯一依据。
+出问题时把日志尾部贴进 issue，比截图有用得多。
+
+日志只在动作、状态变化和异常时写，自动刷新不会刷屏。
+不想要日志可以删掉这个目录，程序会在下次启动时重建。
+
+---
+
+## OSD 屏幕提示不显示怎么办
+
+部分机型（例如无界 14 Pro 2023）装了官方 OSD（`C:\Program Files\OSD\`：
+服务 `BLDHotKeyService` + 界面进程 `BLDFnHotkeyUtility.exe`），
+但按键时屏幕提示不显示 —— 服务在跑、进程也在跑。
+
+OpenMIFS 提供两条路：
+
+### 1. 先试着修（可撤销，不改系统设置）
+
+exe 主界面的「启动与 OSD」区域，或命令行：
+
+```powershell
+.\src\mifs.ps1 osd status      # 服务、界面进程、系统 DPI、DPI 兼容标记状态
+.\src\mifs.ps1 osd dpi-on      # 写 DPI 兼容标记（~ HIGHDPIAWARE），主要嫌疑
+.\src\mifs.ps1 osd restart     # 重启 服务 → 界面进程，让设置生效
+.\src\mifs.ps1 osd diagnose    # 取证：OSDEvents / 心跳 / 显示环境 / DPI
+.\src\mifs.ps1 osd dpi-off     # 撤销 DPI 标记（删掉注册表值，无残留）
+```
+
+`osd restart` 只做三件事：`sc stop/start BLDHotKeyService`、结束并重启 `BLDFnHotkeyUtility.exe`。
+`osd dpi-on` 只写一条标准兼容性标记（`HKLM\...\AppCompatFlags\Layers`，
+和「属性 → 兼容性 → 更改高 DPI 设置」写的是同一条），`osd dpi-off` 即删除。
+
+**为什么先怀疑 DPI**：本机实测 —— 官方 OSD 的界面进程 `BLDFnHotkeyUtility.exe`
+是 **DPI 不感知**的（清单只有 `asInvoker`），而系统缩放是 **125%**；
+它的提示用 `UpdateLayeredWindow` 画分层窗口，在 DPI 不匹配时可能**静默失效**
+（不报错、不崩溃、日志照写）。这也是它看起来"服务在跑、进程也在跑，就是没提示"的原因。
+
+### 2. 直接用它自带的屏幕提示（不依赖官方 OSD）
+
+「启动与 OSD → 操作时显示屏幕提示」勾上后，OpenMIFS 会每 1.5 秒轮询 Fn 键会改动的那几个
+EC 值（性能模式 / Fn 锁 / 触控板锁 / 键盘背光），**发现变化就在屏幕下方弹一条提示**：
+
+- 你自己在 OpenMIFS 里点按钮 → 立刻提示
+- 你按 Fn 组合键 → 最迟 1.5 秒后提示（官方 OSD 失效时的替代）
+
+它显示的是**从 EC 读回来的真实值**，不是猜的。反过来这也很好用：
+按一下 Fn+切换模式，如果 OpenMIFS 弹了提示、官方 OSD 没弹，就说明 EC 和热键链路是好的，
+坏的是官方 OSD 的显示环节。
+
+### 完整诊断证据
+
+```powershell
+OpenMIFS.exe --diagnose     # 无界面，写 %LOCALAPPDATA%\OpenMIFS\osd-diagnose.txt
+```
+
+包含：服务/进程状态与启动时间、安装目录清单、服务安装日志尾部、最近 30 天相关事件日志
+（`BLDFnHotkeyUtility.exe is running...` 心跳会被折叠成一行并给出**时间范围**）、显示器数量与分辨率。
+
+完整说明（组件构成、证据怎么读、三级修复步骤、不要做的事）见
+[docs/OSD.md](docs/OSD.md)。
+
+**取证要点**：`OSDEvents` 日志源有没有近期条目，决定了"Fn 事件有没有送到 OSD 进程"。
+有 → 接收正常、坏在显示（DPI/分层窗口）；没有 → 事件链路本身有问题。
+⚠️ 事件日志必须**按最新优先**读（`ReverseDirection`），否则海量心跳会吃光扫描额度，
+得出"心跳早就停了"的错误结论 —— 这个坑我踩过，诊断器已修正。
+
+---
+
+## 开机自启
+
+「启动与 OSD → 开机自启」勾上即启用。实现方式是**计划任务**（`OpenMIFS`，`/SC ONLOGON /RL HIGHEST`），
+不是注册表 `Run` 项 —— 因为 exe 声明了 `requireAdministrator`，用 `Run` 项的话**每次登录都会弹 UAC**，
+而计划任务可以静默以最高权限启动。
+
+```powershell
+.\src\mifs.ps1 startup status   # 查询
+.\src\mifs.ps1 startup on       # 启用（需要 dist\OpenMIFS.exe 存在）
+.\src\mifs.ps1 startup off      # 关闭
+schtasks /Query /TN OpenMIFS    # 也可以用系统命令查
+```
+
+关掉后不会残留任何东西（`schtasks /Delete /TN OpenMIFS /F`）。
 
 ---
 
@@ -223,8 +344,19 @@ open-mifs/
 ├─ assets/icon.ico         ← 原创图标
 ├─ docs/
 │  ├─ PROTOCOL.md          ← 协议、功能号表、踩坑、被排除的方案
-│  └─ TESTED-MODELS.md     ← 机型实测矩阵
+│  ├─ OSD.md               ← Fn 屏幕提示（OSD）故障诊断与修复
+│  ├─ TESTED-MODELS.md     ← 机型实测矩阵
+│  └─ screenshots/         ← 界面截图
 └─ .github/                ← CI 与 issue 模板
+```
+
+运行时数据（不在仓库里）：
+
+```
+%LOCALAPPDATA%\OpenMIFS\
+├─ openmifs.log            ← 诊断日志（>1 MB 轮转）
+├─ capabilities.txt        ← 能力探测缓存
+└─ osd-diagnose.txt        ← OSD 诊断输出
 ```
 
 ---
@@ -246,6 +378,19 @@ ACPI WMI 方法必须在**实例**上调用，不能在类上调用。本工具�
 
 **Q：模式切换重启后还在吗？**
 部分机型 EC 会保存，部分会被 BIOS 重置。重启后跑一次 `status` 即可确认。
+
+**Q：开机自启为什么用计划任务？会不会弹 UAC？**
+因为 exe 需要管理员权限，注册表 `Run` 项每次登录都会弹 UAC。计划任务用 `/RL HIGHEST`
+可以静默提权启动。任务名 `OpenMIFS`，随时可以用 `startup off` 或 `schtasks /Delete` 清掉。
+
+**Q：日志里有我的隐私吗？**
+日志只记录功能号、读写值、进程号、异常信息和文件路径，不记录键盘输入、不联网、不上报。
+文件在 `%LOCALAPPDATA%\OpenMIFS\`，删目录即可清空。
+
+**Q：Fn 键的 OSD 不显示，这工具能修吗？**
+先跑 `osd status` / `osd restart`（重启服务与界面进程，可逆）。
+如果官方 OSD 仍然不显示，勾上「操作时显示屏幕提示」用 OpenMIFS 自带的提示替代。
+要深挖原因就跑 `osd diagnose` 或 `OpenMIFS.exe --diagnose` 采集证据。
 
 **Q：切了模式感觉没变化？**
 跑 `bench` 实测。它会给出各档的 CPU 性能百分比和风扇峰值，用数据说话。

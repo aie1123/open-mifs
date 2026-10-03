@@ -78,6 +78,44 @@ fn=23  CPU_POWER      -> 00 80 00 17 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0
 - **风扇转速调节**：`13` 号只读，调速需要直接写 EC RAM（MIFS 不暴露）
 - **CPU 温度**：本机未实现，需要 HWiNFO 之类的工具
 
+### 厂商 OSD 实测（2026-10-03）
+
+| 项目 | 值 |
+| :--- | :--- |
+| 组件 | `C:\Program Files\OSD\`（`BLDHotKeyService.exe` + `BLDFnHotkeyUtility.exe`，FileVersion 1.0.6.1） |
+| 服务 | `BLDHotKeyService`，`Running` / `Auto`（LocalSystem），进程 PID 4712（启动于 2026-10-03 12:35:42） |
+| 界面进程 | PID 7768，会话 1，父进程 = 服务的 PID，启动于 2026-10-03 12:35:44，53 MB / 8 线程，Responding=True |
+| 提权方式 | 服务用 SYSTEM 令牌 `CreateProcessAsUser(lpDesktop="WinSta0\Default")` 把界面进程拉进用户桌面 |
+| **事件投递** | Application 日志源 `OSDEvents` **持续有新条目**（最新 2026-10-03 14:10:53），内容为 Fn 事件原始字节（`01-0F-00/01/02`、`01-05-00/02/03`、`01-06-01`、`01-07-00/01`），`ProcessId=7768` |
+| 服务心跳 | `BLDHotKeyServiceEvent` 每 5 秒一条 `BLDFnHotkeyUtility.exe is running...`，**仍在写**（最新 = 当前时刻） |
+| OSD 窗口 | 已创建：类 `WindowsForms10.Window.0.app…`、标题 `FloatingNativeWindow`、120×120、`style=0x84000000`（无 `WS_VISIBLE`）、`exstyle=0x080800A8`（LAYERED+TOPMOST+TOOLWINDOW+TRANSPARENT+NOACTIVATE） |
+| DPI | 界面进程**不感知 DPI**（清单只有 `asInvoker`）；系统 `AppliedDPI=120`（125%），进程按 96 DPI 工作 |
+| 崩溃记录 | 60 天内 Application/WER 无该组件的崩溃条目 |
+| 杀软 | 火绒 `log.db`/`hips.db`/`user.db` 零命中，隔离区为空（`applog.db` 有该 exe 的字符串但无 block/deny 字样） |
+| 症状 | 服务和进程都在跑、Fn 事件也在送达，但屏幕上什么都看不到 |
+
+**判读**：不是"没启动"，不是"崩了"，也不是"Fn 事件没送到" —— **坏在"画出来"这一步**。
+界面进程是 DPI 不感知的，而系统缩放 125%；提示用 `UpdateLayeredWindow` 画（分层窗口），
+这类路径在 DPI/合成环境不匹配时可能**静默失效**（不报错、不崩溃、日志照写）。
+
+**处理**：优先试「DPI 兼容修复」（写 `~ HIGHDPIAWARE` 兼容标记，可撤销）或临时把缩放改成 100% 对照；
+其次考虑「同一秒重复投递导致 Show/Hide 竞态」、「第三方覆盖层/虚拟显示器」。
+完整步骤见 [OSD.md](OSD.md)。
+
+> 顺带排除：本机是单显示器、分辨率正常，"OSD 被画到屏幕外"这条嫌疑不成立
+> （窗口实际位置 `(1092,1056)` 在主屏可视区内）。
+>
+> ⚠️ 一个读取陷阱：事件日志用 `EventLogReader` **正序**读再截断，只会拿到窗口内最早的那批事件
+> （海量心跳会把额度吃光），从而得出"心跳早就停了"的错误结论。
+> OpenMIFS 的诊断器用 `ReverseDirection`（最新优先）读，心跳折叠为时间范围。
+
+### 其他实测结论
+
+- **MIFS SET 不返回执行结果**：`fn=20` 写入不报错但读回不变 → EC 直接忽略。
+  所以判断"能不能写"必须靠写后读回，OpenMIFS 0.2.1 起的 `capabilities.txt` 就是记这个结论的。
+- **无官方控制中心**：机械革命全站控制台条目里没有无界 14 Pro；
+  BIOS 也停在 `T140_PHX_V20`，没有更新。见 [PROTOCOL.md](PROTOCOL.md) §7。
+
 ---
 
 ## 如何贡献你的机型

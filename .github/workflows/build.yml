@@ -37,6 +37,25 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      - name: UTF-8 BOM 检查
+        shell: pwsh
+        run: |
+          # pwsh 7 能读无 BOM 的 UTF-8，但 Windows PowerShell 5.1 会把中文读成乱码
+          # （`.ps1` 甚至会语法报错）。所以强制要求源码带 BOM —— 这个坑踩过两次了。
+          $failed = $false
+          $files = @(Get-ChildItem -Recurse -Include *.ps1, *.cs -File)
+          foreach ($f in $files) {
+            $b = [System.IO.File]::ReadAllBytes($f.FullName)
+            $hasBom = ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
+            if (-not $hasBom) {
+              $failed = $true
+              Write-Host "::error file=$($f.FullName)::缺少 UTF-8 BOM（Windows PowerShell 5.1 会把中文读成乱码）"
+            } else {
+              Write-Host "BOM OK  $($f.Name)"
+            }
+          }
+          if ($failed) { exit 1 }
+
       - name: 生成图标（验证生成器可用）
         shell: pwsh
         run: ./build/make-icon.ps1

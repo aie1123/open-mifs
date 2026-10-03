@@ -71,7 +71,8 @@ if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Forc
 if (Test-Path $outExe) { Remove-Item $outExe -Force }
 
 # ── 3. 组装编译参数
-$refs = @('System.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Management.dll')
+# System.Core.dll 提供 System.Diagnostics.Eventing.Reader（OSD 诊断要查事件日志）
+$refs = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Management.dll')
 $argList = New-Object System.Collections.Generic.List[string]
 $argList.Add('/nologo')
 $argList.Add('/target:winexe')          # GUI 程序，不弹控制台窗口

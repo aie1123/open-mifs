@@ -236,6 +236,50 @@ MIFS 的 14 个功能号里**没有任何一个**涉及充电上限。
 
 ---
 
+## 9. 运行时数据（0.2.1 起）
+
+三种形态（exe / `mifs-gui.ps1` / `mifs.ps1`）写同一套文件：
+
+| 文件 | 作用 |
+| :--- | :--- |
+| `%LOCALAPPDATA%\OpenMIFS\openmifs.log` | 诊断日志，每个动作一行；>1 MB 轮转为 `openmifs.log.1` |
+| `%LOCALAPPDATA%\OpenMIFS\capabilities.txt` | 能力探测缓存（目前只有可写开关 `fanboost=supported\|unsupported\|unknown`） |
+| `%LOCALAPPDATA%\OpenMIFS\osd-diagnose.txt` | OSD 诊断输出 |
+
+日志行格式（首次创建写 UTF-8 BOM，之后追加不带 BOM）：
+
+```
+2026-10-03 14:22:10.412 [INFO ] pid=4176 tid=1 | 切换性能模式 → 均衡（写 fn=8 值=1）
+2026-10-03 14:22:10.690 [INFO ] pid=4176 tid=1 | 性能模式读回 = 均衡
+```
+
+### 为什么要「写后读回」
+
+MIFS 的 SET 不返回执行结果：调用了 `MiInterface(251)` 不抛异常，只说明**报文被接受**，
+不代表 EC 真的改了寄存器。本机（无界 14 Pro 2023）的 `20` MAX_FAN_SWITCH 就是典型：
+写入不报错，读回来还是原值 —— EC 直接忽略了。
+
+所以所有写操作都必须「写 → 等 300~400 ms → 读回」比对，
+`capabilities.txt` 就是记录这类实测结论的地方（判定为 unsupported 后按钮永久置灰，避免每次开机都要再测一遍）。
+
+---
+
+## 10. OSD（Fn 屏幕提示）与 MIFS 的关系
+
+厂商自带的 OSD（`C:\Program Files\OSD\`，服务 `BLDHotKeyService` +
+界面进程 `BLDFnHotkeyUtility.exe`）**不走 MIFS WMI**，它有自己的 EC 访问通道，
+具体细节见 [OSD.md](OSD.md)。
+
+对 OpenMIFS 有两点影响：
+
+1. **可以只读地观察它**：服务状态、界面进程（PID / 启动时间 / 工作集）、
+   以及服务在 Application 日志里每 5 秒写一条的 `BLDFnHotkeyUtility.exe is running...` 心跳。
+   心跳的**时间范围**很有用 —— 心跳停在某个时刻而进程仍在跑，说明服务侧的显示触发链路断了。
+2. **可以替代它的显示效果**：Fn 键会改动的 EC 值（性能模式 / Fn 锁 / 触控板锁 / 键盘背光）
+   都能通过 MIFS 读到，轮询这些值即可自己弹屏幕提示。延迟取决于轮询间隔（OpenMIFS 用 1.5 秒）。
+
+---
+
 ## 参考
 
 - Linux 内核驱动提交：[platform/x86: tongfang-mifs-wmi: Add new Tongfang MIFS WMI driver](https://lore-kernel.gnuweeb.org/platform-driver-x86/20260124124413.46017-1-qby140326@gmail.com/T/)
