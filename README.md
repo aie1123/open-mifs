@@ -30,11 +30,11 @@ mifs.cmd status     ← 从源码跑命令行版
 
 三种形态调用同一套接口，功能完全一致。
 
-<!-- 有截图后取消下面两行的注释（截图放 docs/screenshots/gui.png，见该目录的 README）
-
 ![OpenMIFS 主界面](docs/screenshots/gui.png)
 
--->
+> 左列是硬件控制，右列是状态与传感器；**窗口可拖动缩放，数据区跟着变大**。
+> 上面的截图是**非管理员**下运行的（左侧 MIFS 控件会置灰，右侧传感器不需要管理员照常工作）。
+
 
 ---
 
@@ -242,6 +242,8 @@ schtasks /Query /TN OpenMIFS    # 也可以用系统命令查
 ## 传感器（硬件监控）
 
 exe **首页右侧直接显示**（窗口可拖动缩放，数据区跟着变大），或 `.\src\mifs.ps1 sensors`。**全部免驱动**：
+
+![传感器面板拉大后的样子](docs/screenshots/gui-resized.png)
 只读 Windows 自带的性能计数器（PDH）、WMI 与 MIFS，不加载任何第三方内核组件。
 
 | 组件 | 指标 | 来源 |
