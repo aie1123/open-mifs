@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.3.6.0")]
-[assembly: AssemblyFileVersion("0.3.6.0")]
+[assembly: AssemblyVersion("0.4.0.0")]
+[assembly: AssemblyFileVersion("0.4.0.0")]
 
 namespace OpenMIFS
 {
@@ -1098,7 +1098,13 @@ namespace OpenMIFS
         {
             get
             {
-                try { return Assembly.GetExecutingAssembly().GetName().Version.ToString(); }
+                try
+                {
+                    Version v = Assembly.GetExecutingAssembly().GetName().Version;
+                    return v.Major.ToString(CultureInfo.InvariantCulture) + "."
+                         + v.Minor.ToString(CultureInfo.InvariantCulture) + "."
+                         + v.Build.ToString(CultureInfo.InvariantCulture);
+                }
                 catch { return "未知"; }
             }
         }
@@ -1240,8 +1246,8 @@ namespace OpenMIFS
 
         public MainForm()
         {
-            Text = "OpenMIFS — 同方 MIFS 控制台";
-            ClientSize = new Size(940, 740);
+            Text = "OpenMIFS v" + MifsApp.VersionText + " — 同方 MIFS 控制台";
+            ClientSize = new Size(940, 775);
             MinimumSize = new Size(700, 560);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.Sizable;   // 可拖动缩放：右列数据区跟着窗口变大
@@ -1615,6 +1621,7 @@ namespace OpenMIFS
             _gbStatus.Location = new Point(RightColX, 58);
             _gbStatus.Size = new Size(rightW, 242);
             _gbStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _pnlStatusRows.AutoScroll = true;
             _pnlStatusRows.Location = new Point(8, 18);
             _pnlStatusRows.Size = new Size(rightW - 16, 216);
             _pnlStatusRows.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
@@ -1680,11 +1687,11 @@ namespace OpenMIFS
             public Label Val;
         }
 
-        private const int RowH = 23;
+        private const int RowH = 22;
         private static readonly string[] SensorOrder = new string[]
         {
             "CPU 温度", "CPU 功耗", "CPU 频率", "CPU 负载",
-            "GPU 利用率", "GPU 显存", "GPU 温度", "GPU 频率",
+            "GPU 温度", "GPU 功耗", "GPU 利用率", "GPU 频率", "GPU 显存",
             "内存占用", "内存规格", "磁盘温度", "磁盘",
             "风扇1", "风扇2", "风扇3", "电池"
         };
@@ -2414,7 +2421,7 @@ namespace OpenMIFS
             if (anyOk)
             {
                 _lblHeader.ForeColor = ColOk;
-                _lblHeader.Text = "接口正常 · " + (MifsApp.IsElevated ? "已提权" : "未提权") + " · 托盘常驻"
+                _lblHeader.Text = "OpenMIFS v" + MifsApp.VersionText + " · 接口正常 · " + (MifsApp.IsElevated ? "已提权" : "未提权") + " · 托盘常驻"
                                 + (Log.Available ? " · 日志已开启" : " · 日志不可用（只读目录？）")
                                 + "\r\n本机未实现：" + (missing.Count == 0 ? "无，全部功能可用" : string.Join("、", missing.ToArray()));
             }
@@ -2458,6 +2465,7 @@ namespace OpenMIFS
         private readonly ToolStripMenuItem _miFanBoost = new ToolStripMenuItem();
         private readonly ToolStripMenuItem _miStartup = new ToolStripMenuItem();
         private readonly ToolStripMenuItem _miStatus = new ToolStripMenuItem();
+        private readonly ToolStripMenuItem _miVersion = new ToolStripMenuItem();
         private readonly System.Windows.Forms.Timer _trayTimer = new System.Windows.Forms.Timer();
         private bool _suppress;
         private bool _exiting;
@@ -2469,6 +2477,12 @@ namespace OpenMIFS
 
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.Font = new Font("Microsoft YaHei UI", 9F);
+
+            _miVersion.Text = "OpenMIFS v" + MifsApp.VersionText + "（同方 MIFS 控制台）";
+            _miVersion.Enabled = false;
+            _miVersion.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+            menu.Items.Add(_miVersion);
+            menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem miShow = new ToolStripMenuItem("显示主界面(&O)");
             miShow.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
@@ -2531,7 +2545,7 @@ namespace OpenMIFS
             menu.Items.Add(miExit);
 
             _tray.ContextMenuStrip = menu;
-            _tray.Text = "OpenMIFS — 同方 MIFS 控制台";
+            _tray.Text = "OpenMIFS v" + MifsApp.VersionText + " — 同方 MIFS 控制台";
             _tray.Visible = true;
             try { _tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
             catch { }
@@ -2655,7 +2669,7 @@ namespace OpenMIFS
                 _miStartup.Checked = Startup.IsEnabled();
 
                 int[] fans = Mifs.GetFans();
-                string tip = "OpenMIFS";
+                string tip = "OpenMIFS v" + MifsApp.VersionText;
                 if (pm.HasValue) tip += " · " + ModeMap.Label(pm.Value);
                 if (fans != null) tip += string.Format(CultureInfo.InvariantCulture, " · 风扇 {0}/{1} RPM", fans[0], fans[1]);
                 if (tip.Length > 62) tip = tip.Substring(0, 62);

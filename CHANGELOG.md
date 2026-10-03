@@ -15,6 +15,32 @@
 - 记下一条可复用的判据规矩：凡"写入是否真的生效"，都要找一个**独立于寄存器镜像的物理量**
   （风扇看转速、性能模式看实测性能百分比、充电看实际注入电量）—— 这次误判就是只看了寄存器镜像
 
+## [0.4.0] - 2026-10-03
+
+### 新增
+
+- **核显温度、CPU die 温度、GPU 功耗与频率（零内核驱动）** —— 走 AMD 显卡驱动自带的
+  **用户态 DLL `atiadlxx.dll` 的 ADL2 PMLog 接口**（`ADL2_New_QueryPMLogData_Get`），
+  也就是 AMD Software: Adrenalin Edition「性能 → 指标」页读的同一套数据。**不需要管理员。**
+  - 核显温度 `TEMPERATURE_GFX`(#28)、CPU die 温度 `TEMPERATURE_CPU`(#32)、SoC 温度 `TEMPERATURE_SOC`(#29)
+  - GPU 功耗 `ASIC_POWER`(#23)、核显频率 `CLK_GFXCLK`(#1)、显存频率 `CLK_MEMCLK`(#2)、CPU 频率 `CLK_CPUCLK`(#34)
+  - 温度行改以 SMU 真值为准；ACPI 热区降级为「热区温度」兜底（拿不到 SMU 时才显示）
+  - 验证：8 线程负载下三个温度传感器同向上升（GPU 52→56、CPU 51→57、SoC 54→57 ℃），
+    显存频率恒等于 DDR5-5600 的一半，CPU 频率与 PDH 估算互相印证
+- **磁盘温度兜底通道**：WMI `MSFT_StorageReliabilityCounter` 不可用时，
+  改用 `IOCTL_STORAGE_QUERY_PROPERTY`（`StorageDeviceTemperatureProperty` → `StorageAdapterTemperatureProperty`），
+  并对返回值做单位兜底（>200 视为开尔文）
+- **界面显示版本号**：窗口标题栏、顶部状态条第一行、托盘右键菜单顶部（不可点的加粗条目）、
+  托盘悬停提示 —— 全部带上 `OpenMIFS v0.4.0`
+
+### 更正
+
+- **推翻此前"CPU die 温度拿不到、必须内核驱动"的结论**：AMD 的驱动自带用户态遥测通道，
+  老接口（`ADL_Overdrive5/6_Temperature_Get`）在核显上确实失效，但新接口 PMLog 一直有值。
+  docs/SENSORS.md 已重写相关章节并附传感器编号表
+- `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA=61)` 返回 `STATUS_INVALID_PARAMETER`，
+  未继续深挖（PMLog 已够用），记录在案
+
 ## [0.3.8] - 2026-10-03
 
 ### 文档

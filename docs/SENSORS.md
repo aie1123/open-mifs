@@ -1,4 +1,4 @@
-# 传感器：能读到什么、怎么读（可行性分析）
+﻿# 传感器：能读到什么、怎么读（可行性分析）
 
 > **状态：0.3.0 已实现**。exe 的「传感器」选项卡、`.\src\mifs.ps1 sensors`、
 > `OpenMIFS.exe --sensors` 都用本文这套数据源。实现踩到的坑见第 3 节。
@@ -38,17 +38,66 @@
 | 目标 | 途径 | 结论 |
 | :--- | :--- | :--- |
 | NVMe **温度** | `MSFT_StorageReliabilityCounter`（`Temperature`/`Wear`/`PowerOnHours`，按 `DeviceId` 与 `MSFT_PhysicalDisk` 配对） | 非管理员报「拒绝访问」；**exe 已提权，应可用**（面板上会显示具体错误，便于确认） |
-| GPU **温度 / 频率** | P/Invoke `atiadlxx.dll`：`ADL_Main_Control_Create` + `ADL_Overdrive5_Temperature_Get` / `ADL_Overdrive6_Temperature_Get` | ❌ **本机取不到**：ADL 能加载、接口都存在，但 5 个适配器都返回不支持（Radeon 780M 核显）。面板如实显示「未实现」，不做假数据 |
+| GPU **温度 / 频率 / 功耗** | ✅ **改用 ADL2 PMLog**（见下）：`ADL2_Main_Control_Create` + `ADL2_New_QueryPMLogData_Get`。旧的 Overdrive5/6 接口在本机核显上确实取不到，但 PMLog 可以 |
 | GPU 温度（未试的备选） | `gdi32!D3DKMTQueryAdapterInfo` + `KMTQAITYPE_ADAPTERPERFDATA` | 未验证；比 ADL 更通用（NVIDIA/Intel/AMD 同一套），但同样取决于驱动是否实现 |
 
 ### ❌ 免驱动拿不到（别绕）
 
 | 目标 | 为什么拿不到 |
 | :--- | :--- |
-| CPU 核心温度 Tctl/Tdie | AMD 走 SMU 邮箱（PCI 0:0.0 索引端口），用户态碰不到；ACPI 热区只有 1 个 `_tz.tz01`，是 EC 上报的板级/封装邻区温度，不是 die 温度 |
+| ~~CPU 核心温度 Tctl/Tdie~~ | ✅ **已推翻**：不需要直接碰 SMU 邮箱 —— AMD 的显卡驱动自己装了一个**用户态 DLL `atiadlxx.dll`**，通过它就能读到 SMU 暴露出来的 die 温度（见下节）。这不是绕开硬件，而是走 AMD 官方给的用户态通道 |
 | 主板 / VRM / 供电模块温度 | 在 EC 的传感器表里，需要直接读 EC RAM（内核驱动） |
 | 内存温度 | SPD Hub（SMBus），需要驱动 |
 | 独立显卡 | 本机没有独显 |
+
+### 2.5 GPU / CPU die 温度怎么来的：ADL2 PMLog（0.4.0 新增）
+
+**这就是 AMD Software: Adrenalin Edition「性能 → 指标」页读的同一套东西** ——
+AMD 的显卡驱动装了一个**用户态** DLL `C:\Windows\System32\atiadlxx.dll`（本机 7.26.10.1609），
+它把 SMU 的遥测（温度、功耗、频率、电压）暴露给用户态程序。**不需要内核驱动、不需要管理员。**
+
+调用顺序：
+
+```c
+ADL2_Main_Control_Create(allocCallback, 1, &ctx);          // 一次，回调用 malloc 语义
+ADL2_Adapter_NumberOfAdapters_Get(ctx, &n);
+ADL2_New_QueryPMLogData_Get(ctx, adapterIndex, &data);     // 每次读取
+// data: { int size; { int size; int value; } sensors[256]; }  （2052 字节）
+```
+
+传感器编号来自 AMD 官方 `adl_defines.h` 的 `ADL_PMLOG_SENSORS` 枚举（节选，本机实测值）：
+
+| # | 枚举名 | 含义 | 本机实测 |
+| :---: | :--- | :--- | :--- |
+| 1 | `CLK_GFXCLK` | 核显频率 MHz | 800（空闲） |
+| 2 | `CLK_MEMCLK` | 显存频率 MHz | 2800（= DDR5-5600 的一半） |
+| 16 | `SOC_VOLTAGE` | SoC 电压 mV | 965 |
+| 19 | `INFO_ACTIVITY_GFX` | 核显活动 % | 16~35 |
+| 23 | `ASIC_POWER` | APU 功耗 W | 20~29 |
+| 28 | **`TEMPERATURE_GFX`** | **核显温度 ℃** | 52~59 |
+| 29 | `TEMPERATURE_SOC` | SoC 温度 ℃ | 54~58 |
+| 32 | **`TEMPERATURE_CPU`** | **CPU die 温度 ℃** | 51~58 |
+| 34 | `CLK_CPUCLK` | CPU 频率 MHz | 2.4~3.6 GHz（全核负载时降到 2.4，与 PDH 估算互相印证） |
+
+**怎么确认它是真值而不是常数**（本项目的验证纪律）：跑 8 线程负载，
+`TEMPERATURE_GFX` 52→56 ℃、`TEMPERATURE_CPU` 51→57 ℃、`TEMPERATURE_SOC` 54→57 ℃ 三者同向上升；
+`CLK_MEMCLK` 恒等于内存标称频率的一半；`CLK_CPUCLK` 与 PDH 估算的有效频率同量级 —— 多源一致。
+
+> 走过的弯路：`ADL_Overdrive5_Temperature_Get` / `ADL_Overdrive6_Temperature_Get`（老接口）
+> 在本机核显上 5 个适配器全部返回不支持 —— 一度据此判断"核显温度拿不到"。
+> **结论是错的**：新接口 PMLog 一直是有值的，只是老接口不再维护核显。
+> 另一个候选 `D3DKMTQueryAdapterInfo(KMTQAITYPE_ADAPTERPERFDATA=61)` 返回
+> `STATUS_INVALID_PARAMETER`，未继续深挖（PMLog 已经够用）。
+
+### 2.6 磁盘温度的两条通道
+
+| 通道 | 条件 | 说明 |
+| :--- | :--- | :--- |
+| WMI `MSFT_StorageReliabilityCounter.Temperature` | **需要管理员** | 首选；同时给磨损与通电时长 |
+| `IOCTL_STORAGE_QUERY_PROPERTY`（`StorageDeviceTemperatureProperty`=22 → `StorageAdapterTemperatureProperty`=21） | **需要管理员** | 兜底；对 `\\.\PhysicalDriveN` 发 IOCTL，读 `STORAGE_TEMPERATURE_INFO.Temperature`（对单位做兜底：>200 视为开尔文） |
+
+两条都需要提权，而 **exe 本身就是 `requireAdministrator`**，所以正常使用下应能显示；
+把盘接在 USB 硬盘盒等场景可能两条都不支持，届时显示「未实现」并写明原因。
 
 ---
 

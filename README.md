@@ -272,8 +272,9 @@ exe **首页右侧直接显示**（窗口可拖动缩放，数据区跟着变大
 | :--- | :--- | :--- |
 | CPU | **封装功耗**（AMD RAPL）、每核功耗、SoC/VDDCR 域、插槽功耗 | PDH `\Energy Meter(*)\Power`（mW） |
 | CPU | 有效频率（估算）、负载 | PDH `\Processor Information(_Total)` |
-| 温度 | **热区 / 封装邻区温度**、高精度温度、**降频原因** | PDH `\Thermal Zone Information(*)\Temperature`（K） |
+| 温度 | **CPU die 温度**、**核显温度**、SoC 温度、热区温度、降频原因 | **ADL2 PMLog（`atiadlxx.dll`，AMD 官方用户态通道 = Adrenalin 同源）** + PDH 热区 |
 | GPU | 利用率（按引擎）、专用显存占用 | WMI `Win32_PerfFormattedData_GPUPerformanceCounters_*` |
+| GPU | **功耗**、核显/显存频率 | ADL2 PMLog `ASIC_POWER` / `CLK_GFXCLK` / `CLK_MEMCLK` |
 | 内存 | 容量 / 类型 / 速率 / 占用 | WMI `Win32_PhysicalMemory` + `Win32_OperatingSystem` |
 | 存储 | 型号 / 介质 / 总线 / 健康 / **温度**（需管理员）/ 磨损 / 通电时长 | `MSFT_PhysicalDisk` + `MSFT_StorageReliabilityCounter` |
 | 风扇 | 双风扇转速 | MIFS `fn=13` |
@@ -283,10 +284,12 @@ exe **首页右侧直接显示**（窗口可拖动缩放，数据区跟着变大
 热区温度 52.9 ℃ → 64.9 ℃ 随负载变化 —— 都是能标定的真值。
 命令 `.\src\mifs.ps1 sensors probe` 会逐项告诉你这台机器哪些通道可用。
 
-**读不到的**（需要内核驱动，本项目刻意不做）：**CPU die 温度 Tctl/Tdie**、
-主板/VRM/供电模块温度、内存温度。原因是 AMD 的 die 温度走 SMU 邮箱、电压/温度传感器在 EC 里，
-用户态碰不到；而能碰到它们的方案（WinRing0 等）已被微软列入**易受攻击驱动黑名单**，
-与"不加载任何驱动"的定位直接冲突。
+**CPU die 温度与核显温度都能读到** —— 走 AMD 显卡驱动自带的用户态 DLL `atiadlxx.dll`
+（`ADL2_New_QueryPMLogData_Get`，也就是 Adrenalin「性能 → 指标」页的那套数据），
+**不需要内核驱动、不需要管理员**。实测负载下 GPU 52→56 ℃、CPU 51→57 ℃ 同向变化。
+
+**仍然读不到的**：主板 / VRM / 内存温度 —— 它们在 EC 与 SPD Hub 里，只有内核驱动能碰；
+而能碰它们的方案（WinRing0 等）已被微软列入**易受攻击驱动黑名单**，与"不加载任何驱动"的定位冲突。
 
 想要完整传感器（含 Tctl、主板、VRM），可以自己装并运行 LibreHardwareMonitor，
 本工具**不打包、不加载**它的驱动。技术分析与实测依据见 [docs/SENSORS.md](docs/SENSORS.md)。

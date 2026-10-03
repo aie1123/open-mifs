@@ -205,6 +205,105 @@ namespace OpenMIFS
             return _zoneInstance;
         }
 
+        // ─────────────────────────────── GPU / CPU 温度（ADL2 PMLog，AMD 官方用户态通道）
+        // 这是 AMD Software: Adrenalin Edition「性能 → 指标」页读的同一套数据：
+        // atiadlxx.dll（随显卡驱动安装，用户态 DLL，不需要内核驱动、不需要管理员）
+        //   ADL2_Main_Control_Create → ADL2_New_QueryPMLogData_Get(adapter, ADLPMLogDataOutput)
+        // 结构：{ int size; { int size; int value; } sensors[256]; }
+        // 传感器编号来自 ADL 官方 adl_defines.h 的 ADL_PMLOG_SENSORS 枚举。
+        // 本机实测（Radeon 780M，Win11）：温度/功耗/频率全部有值，
+        // 负载下 GPU 52→56 ℃、CPU 51→57 ℃、SoC 54→57 ℃ 同向变化（是真实传感器，不是常数）。
+        internal static class AdlPmlog
+        {
+            private delegate IntPtr AllocCb(int size);
+
+            [DllImport("atiadlxx.dll")]
+            private static extern int ADL2_Main_Control_Create(AllocCb cb, int enumConnected, out IntPtr ctx);
+            [DllImport("atiadlxx.dll")]
+            private static extern int ADL2_Adapter_NumberOfAdapters_Get(IntPtr ctx, out int num);
+            [DllImport("atiadlxx.dll")]
+            private static extern int ADL2_New_QueryPMLogData_Get(IntPtr ctx, int adapterIndex, IntPtr data);
+
+            // ADL_PMLOG_SENSORS（官方 adl_defines.h）
+            public const int ClkGfx = 1;        // GFXCLK  MHz
+            public const int ClkMem = 2;        // MEMCLK  MHz
+            public const int SocVoltage = 16;   // mV
+            public const int GfxActivity = 19;  // %
+            public const int AsicPower = 23;    // W
+            public const int TempGfx = 28;      // ℃（核显温度）
+            public const int TempSoc = 29;      // ℃
+            public const int TempCpu = 32;      // ℃（CPU die，来自 SMU）
+            public const int ClkCpu = 34;       // MHz
+
+            private const int SensorCount = 256;
+            private const int BufSize = 4 + SensorCount * 8;
+
+            private static AllocCb _keepAlive;          // 回调必须保活
+            private static IntPtr _ctx = IntPtr.Zero;
+            private static IntPtr _buf = IntPtr.Zero;
+            private static bool _tried;
+            private static bool _ok;
+            private static int _adapter = -1;
+            private static string _note = "未探测";
+
+            public static bool Available { get { return _ok; } }
+            public static string Note { get { return _note; } }
+
+            private static IntPtr Alloc(int size) { return Marshal.AllocHGlobal(size); }
+
+            /// <summary>初始化（惰性，只做一次）。失败也只是一条说明，不影响其它传感器。</summary>
+            public static void Init()
+            {
+                if (_tried) return;
+                _tried = true;
+                try
+                {
+                    _keepAlive = new AllocCb(Alloc);
+                    int rc = ADL2_Main_Control_Create(_keepAlive, 1, out _ctx);
+                    if (rc != 0) { _note = "ADL2 初始化失败 rc=" + rc.ToString(CultureInfo.InvariantCulture); return; }
+                    int n = 0;
+                    ADL2_Adapter_NumberOfAdapters_Get(_ctx, out n);
+                    _buf = Marshal.AllocHGlobal(BufSize);
+
+                    // 找一个真能读出温度的适配器（本机 5 个适配器数据相同，取第一个有效的即可）
+                    for (int a = 0; a < n; a++)
+                    {
+                        int t = ReadAt(a, TempGfx);
+                        if (t > 0 && t < 120) { _ok = true; _adapter = a; break; }
+                    }
+                    _note = _ok
+                        ? "ADL2 PMLog（适配器 " + _adapter.ToString(CultureInfo.InvariantCulture)
+                          + " / 共 " + n.ToString(CultureInfo.InvariantCulture) + "，AMD 官方用户态通道）"
+                        : "ADL2 PMLog 可用但没有温度数据（共 " + n.ToString(CultureInfo.InvariantCulture) + " 个适配器）";
+                    Log.Info("传感器：ADL2 PMLog → " + _note);
+                }
+                catch (Exception ex)
+                {
+                    _note = "加载 atiadlxx.dll 失败：" + ex.Message;
+                    Log.Ex("传感器：ADL2 PMLog 初始化异常", ex);
+                }
+            }
+
+            private static int ReadAt(int adapter, int sensor)
+            {
+                if (_ctx == IntPtr.Zero || _buf == IntPtr.Zero) return -1;
+                try
+                {
+                    for (int i = 0; i < BufSize; i++) Marshal.WriteByte(_buf, i, 0);
+                    if (ADL2_New_QueryPMLogData_Get(_ctx, adapter, _buf) != 0) return -1;
+                    return Marshal.ReadInt32(_buf, 4 + sensor * 8 + 4);
+                }
+                catch { return -1; }
+            }
+
+            /// <summary>读一个传感器；不可用返回 -1。</summary>
+            public static int Get(int sensor)
+            {
+                if (!_ok) return -1;
+                return ReadAt(_adapter, sensor);
+            }
+        }
+
         // ─────────────────────────────────────────────── GPU（ADL，用户态，不捆绑二进制）
         private static bool _adlTried;
         private static bool _adlOk;
@@ -367,26 +466,38 @@ namespace OpenMIFS
             else
                 list.Add(new Reading("CPU", "CPU 功耗", "未实现", false, pkgNote));
 
-            // ── 温度（ACPI 热区）
-            if (zone != null)
+            // ── 温度：优先用 AMD 官方通道（ADL PMLog），它给的是真 die 温度；
+            //         拿不到才退回 ACPI 热区（EC 上报的封装邻区，偏低且滞后）
+            AdlPmlog.Init();
+            int tCpu = AdlPmlog.Get(AdlPmlog.TempCpu);
+            int tGfx = AdlPmlog.Get(AdlPmlog.TempGfx);
+            int tSoc = AdlPmlog.Get(AdlPmlog.TempSoc);
+
+            if (tCpu > 0 && tCpu < 120)
+            {
+                string cpuNote = "SMU 传感器 TEMPERATURE_CPU（#"
+                    + AdlPmlog.TempCpu.ToString(CultureInfo.InvariantCulture) + "），" + AdlPmlog.Note;
+                if (tSoc > 0 && tSoc < 120) cpuNote += "；TEMPERATURE_SOC（#" + AdlPmlog.TempSoc.ToString(CultureInfo.InvariantCulture) + "）=" + tSoc.ToString(CultureInfo.InvariantCulture) + " ℃";
+                if (zone != null)
+                {
+                    float? th = Next("Thermal Zone Information", "Throttle Reasons", zone);
+                    if (th.HasValue) cpuNote += "；ACPI 降频原因=" + th.Value.ToString("0", CultureInfo.InvariantCulture) + (th.Value == 0 ? "（正常）" : "（正在降频！）");
+                }
+                list.Add(new Reading("温度", "CPU 温度", tCpu.ToString(CultureInfo.InvariantCulture) + " ℃", true, cpuNote));
+            }
+            else if (zone != null)
             {
                 float? t = Next("Thermal Zone Information", "Temperature", zone);
-                float? hp = Next("Thermal Zone Information", "High Precision Temperature", zone);
-                float? th = Next("Thermal Zone Information", "Throttle Reasons", zone);
                 if (t.HasValue)
-                {
-                    string v = string.Format(CultureInfo.InvariantCulture, "{0:0.0} ℃", t.Value - 273.15f);
-                    string note = "ACPI 热区 " + zone + "（EC 上报的封装邻区，不是 die 温度）";
-                    if (hp.HasValue) note += "，高精度 " + (hp.Value / 10.0 - 273.15).ToString("0.0", CultureInfo.InvariantCulture) + " ℃";
-                    if (th.HasValue) note += "，降频原因 " + th.Value.ToString("0", CultureInfo.InvariantCulture) + (th.Value == 0 ? "（正常）" : "（正在降频！）");
-                    list.Add(new Reading("温度", "CPU 温度", v, true, note));
-                }
+                    list.Add(new Reading("温度", "热区温度", string.Format(CultureInfo.InvariantCulture, "{0:0.0} ℃", t.Value - 273.15f), true,
+                        "ACPI 热区 " + zone + "（EC 上报的封装邻区，比 die 温度低且滞后）"));
             }
             else
             {
-                list.Add(new Reading("温度", "CPU 温度", "未实现", false, "本机没有 Thermal Zone Information 计数器"));
+                list.Add(new Reading("温度", "CPU 温度", "未实现", false, "ADL PMLog 与 ACPI 热区都不可用"));
             }
-            // CPU die 温度写进日志与探测报告即可，面板上不放这一行（它恒为"不支持"）
+
+
             // ── GPU
             List<KeyValuePair<string, double>> gpu = PerfFormatted(
                 "Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine", "UtilizationPercentage");
@@ -425,8 +536,28 @@ namespace OpenMIFS
             if (gm.Count > 0)
                 list.Add(new Reading("GPU", "GPU 显存", string.Format(CultureInfo.InvariantCulture, "{0:0} MB", memSum / 1048576.0), true, "WMI GPU Adapter Memory"));
 
+            // GPU 温度 / 功耗 / 频率：优先 ADL2 PMLog（Adrenalin 同源，实测本机核显有值）
+            if (tGfx > 0 && tGfx < 120)
+                list.Add(new Reading("GPU", "GPU 温度", tGfx.ToString(CultureInfo.InvariantCulture) + " ℃", true,
+                    "SMU 传感器 TEMPERATURE_GFX（#" + AdlPmlog.TempGfx.ToString(CultureInfo.InvariantCulture) + "），" + AdlPmlog.Note));
+
+            int gfxClk = AdlPmlog.Get(AdlPmlog.ClkGfx);
+            int memClk = AdlPmlog.Get(AdlPmlog.ClkMem);
+            if (gfxClk > 0)
+            {
+                string clkNote = "ADL_PMLOG_CLK_GFXCLK（核显，空闲约 800 MHz，负载时上boost）";
+                if (memClk > 0) clkNote += "；显存 ADL_PMLOG_CLK_MEMCLK=" + memClk.ToString(CultureInfo.InvariantCulture) + " MHz（DDR5-5600 的一半）";
+                list.Add(new Reading("GPU", "GPU 频率", gfxClk.ToString(CultureInfo.InvariantCulture) + " MHz", true, clkNote));
+            }
+
+            int asicPower = AdlPmlog.Get(AdlPmlog.AsicPower);
+            if (asicPower > 0 && asicPower < 300)
+                list.Add(new Reading("GPU", "GPU 功耗", asicPower.ToString(CultureInfo.InvariantCulture) + " W", true,
+                    "ADL_PMLOG_ASIC_POWER（APU 整体，含 CPU 与核显）"));
+
+            // ADL Overdrive5/6 作为兜底（本机核显取不到值，留着给独显机型）
             AdlInit();
-            if (_adlOk)
+            if (!(tGfx > 0) && _adlOk)
             {
                 double tempC = 0;
                 bool haveTemp = false;
@@ -450,23 +581,7 @@ namespace OpenMIFS
                     }
                 }
                 if (haveTemp)
-                    list.Add(new Reading("GPU", "GPU 温度", string.Format(CultureInfo.InvariantCulture, "{0:0.0} ℃", tempC), true, "ADL（" + _adlNote + "）"));
-
-                ADLPMActivity a = new ADLPMActivity();
-                a.iSize = Marshal.SizeOf(typeof(ADLPMActivity));
-                if (Adl.ADL_Overdrive5_CurrentActivity_Get(_adlAdapter, out a) == 0)
-                {
-                    if (a.iEngineClock > 0)
-                        list.Add(new Reading("GPU", "GPU 频率", string.Format(CultureInfo.InvariantCulture, "{0:0} MHz", a.iEngineClock / 100.0), true, "ADL Overdrive5"));
-                    if (a.iMemoryClock > 0)
-                        list.Add(new Reading("GPU", "GPU 频率(显存)", string.Format(CultureInfo.InvariantCulture, "{0:0} MHz", a.iMemoryClock / 100.0), true, "ADL Overdrive5"));
-                    if (a.iActivityPercent > 0)
-                        list.Add(new Reading("GPU", "GPU 活动度", string.Format(CultureInfo.InvariantCulture, "{0} %", a.iActivityPercent), true, "ADL Overdrive5"));
-                }
-            }
-            else
-            {
-                list.Add(new Reading("GPU", "GPU 温度", "未实现", false, _adlNote));
+                    list.Add(new Reading("GPU", "GPU 温度", string.Format(CultureInfo.InvariantCulture, "{0:0.0} ℃", tempC), true, "ADL Overdrive（" + _adlNote + "）"));
             }
 
             // ── 内存
@@ -557,6 +672,7 @@ namespace OpenMIFS
                     // 面板上拆成两行：磁盘（型号/容量）与 磁盘温度（温度/磨损/通电）
                     string tempText = "未实现";
                     string tempNote = note;
+                    bool tempOk = false;
                     if (rel.TryGetValue(did, out c2))
                     {
                         int temp = Int(c2["Temperature"]);
@@ -565,21 +681,35 @@ namespace OpenMIFS
                         tempText = (temp > 0 ? temp.ToString(CultureInfo.InvariantCulture) + " ℃" : "未知")
                                  + "  磨损 " + wear.ToString(CultureInfo.InvariantCulture)
                                  + (hours > 0 ? "  通电 " + hours.ToString(CultureInfo.InvariantCulture) + " h" : "");
-                        tempNote = note + " + StorageReliabilityCounter";
-                    }
-                    else if (relError.Length > 0)
-                    {
-                        tempText = "需要管理员";
-                        tempNote = note + "（" + relError + "）";
+                        tempNote = note + " + WMI StorageReliabilityCounter";
+                        tempOk = true;
                     }
                     else
                     {
-                        tempNote = note + "（该盘没有可靠性计数器）";
+                        // WMI 可靠性计数器拿不到（未提权 / 该盘不支持）→ 试 IOCTL 温度属性
+                        int idx;
+                        if (!int.TryParse(did, out idx)) idx = 0;
+                        int? io = DiskTemperatureIoctl(idx);
+                        if (io.HasValue)
+                        {
+                            tempText = io.Value.ToString(CultureInfo.InvariantCulture) + " ℃";
+                            tempNote = note + " + IOCTL_STORAGE_QUERY_PROPERTY（温度属性）";
+                            tempOk = true;
+                        }
+                        else if (relError.Length > 0)
+                        {
+                            tempText = "需要管理员";
+                            tempNote = note + "（WMI：" + relError + "；IOCTL 也没成功，见日志）";
+                        }
+                        else
+                        {
+                            tempNote = note + "（该盘没有可靠性计数器，IOCTL 也没读到）";
+                        }
                     }
 
                     list.Add(new Reading("存储", "磁盘", name + (media.Length > 0 ? "（" + media + "）" : "")
                         + "  " + string.Format(CultureInfo.InvariantCulture, "{0:0} GB", gb), true, note + "（容量与型号）"));
-                    list.Add(new Reading("存储", "磁盘温度", tempText, !tempText.StartsWith("需要"), tempNote));
+                    list.Add(new Reading("存储", "磁盘温度", tempText, tempOk, tempNote));
                 }
             }
             catch (Exception ex) { Log.Ex("传感器：读磁盘失败", ex); }
@@ -710,6 +840,87 @@ namespace OpenMIFS
             sb.AppendLine("   CPU die 温度、主板/VRM/内存温度需要内核驱动，本项目刻意不做，见 docs/SENSORS.md。");
             Log.Info("执行了传感器探测");
             return sb.ToString();
+        }
+
+        // ─────────────────────────────── 磁盘温度兜底：IOCTL_STORAGE_QUERY_PROPERTY
+        private const uint GENERIC_READ = 0x80000000;
+        private const uint FILE_SHARE_READ = 1;
+        private const uint FILE_SHARE_WRITE = 2;
+        private const uint OPEN_EXISTING = 3;
+        private const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x2D1400;
+        private const int StorageAdapterTemperatureProperty = 21;
+        private const int StorageDeviceTemperatureProperty = 22;
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr templ);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool DeviceIoControl(IntPtr h, uint code, IntPtr inBuf, uint inSize,
+            IntPtr outBuf, uint outSize, out uint returned, IntPtr overlapped);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr h);
+
+        /// <summary>读物理盘温度：WMI 可靠性计数器不可用时的兜底通道（同样需要管理员）。
+        /// 两种属性都试：StorageDeviceTemperatureProperty(22) → StorageAdapterTemperatureProperty(21)，
+        /// 并对单位做兜底判断（有的驱动给开尔文）。</summary>
+        private static int? DiskTemperatureIoctl(int driveIndex)
+        {
+            IntPtr h = IntPtr.Zero, inBuf = IntPtr.Zero, outBuf = IntPtr.Zero;
+            try
+            {
+                h = CreateFileW(@"\\.\PhysicalDrive" + driveIndex.ToString(CultureInfo.InvariantCulture),
+                    GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (h == new IntPtr(-1))
+                {
+                    Log.Warn("传感器：打开 PhysicalDrive" + driveIndex.ToString(CultureInfo.InvariantCulture)
+                        + " 失败（需要管理员）err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                    return null;
+                }
+
+                inBuf = Marshal.AllocHGlobal(16);
+                outBuf = Marshal.AllocHGlobal(1024);
+                for (int i = 0; i < 16; i++) Marshal.WriteByte(inBuf, i, 0);
+                for (int i = 0; i < 1024; i++) Marshal.WriteByte(outBuf, i, 0);
+
+                int[] props = new int[] { StorageDeviceTemperatureProperty, StorageAdapterTemperatureProperty };
+                for (int p = 0; p < props.Length; p++)
+                {
+                    Marshal.WriteInt32(inBuf, 0, props[p]);   // PropertyId
+                    Marshal.WriteInt32(inBuf, 4, 0);          // QueryType = PropertyStandardQuery
+                    for (int i = 0; i < 1024; i++) Marshal.WriteByte(outBuf, i, 0);
+                    uint ret = 0;
+                    if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, inBuf, 16, outBuf, 1024, out ret, IntPtr.Zero))
+                    {
+                        Log.Info("传感器：磁盘温度 IOCTL property=" + props[p].ToString(CultureInfo.InvariantCulture)
+                            + " 失败 err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                        continue;
+                    }
+                    int infoCount = Marshal.ReadInt16(outBuf, 12);       // STORAGE_TEMPERATURE_DATA_DESCRIPTOR.InfoCount
+                    if (infoCount <= 0)
+                    {
+                        Log.Info("传感器：磁盘温度 IOCTL property=" + props[p].ToString(CultureInfo.InvariantCulture) + " 成功但 InfoCount=0");
+                        continue;
+                    }
+                    short raw = Marshal.ReadInt16(outBuf, 24 + 2);       // Info[0].Temperature
+                    int t = raw;
+                    if (t > 200) t = (int)Math.Round(t - 273.15);         // 有的驱动给开尔文
+                    if (t > 0 && t < 120)
+                    {
+                        Log.Info("传感器：磁盘温度来自 IOCTL property=" + props[p].ToString(CultureInfo.InvariantCulture)
+                            + " → " + t.ToString(CultureInfo.InvariantCulture) + " ℃（原始 " + raw.ToString(CultureInfo.InvariantCulture) + "）");
+                        return t;
+                    }
+                    Log.Info("传感器：磁盘温度 IOCTL property=" + props[p].ToString(CultureInfo.InvariantCulture)
+                        + " 返回值不合理：原始 " + raw.ToString(CultureInfo.InvariantCulture));
+                }
+                return null;
+            }
+            catch (Exception ex) { Log.Ex("传感器：磁盘温度 IOCTL 异常", ex); return null; }
+            finally
+            {
+                if (inBuf != IntPtr.Zero) Marshal.FreeHGlobal(inBuf);
+                if (outBuf != IntPtr.Zero) Marshal.FreeHGlobal(outBuf);
+                if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
+            }
         }
 
         private static string W(float mw) { return string.Format(CultureInfo.InvariantCulture, "{0:0.00} W", mw / 1000.0); }
