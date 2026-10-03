@@ -36,8 +36,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.3.0.0")]
-[assembly: AssemblyFileVersion("0.3.0.0")]
+[assembly: AssemblyVersion("0.3.1.0")]
+[assembly: AssemblyFileVersion("0.3.1.0")]
 
 namespace OpenMIFS
 {
@@ -1049,6 +1049,7 @@ namespace OpenMIFS
         private readonly TextBox _txtSensors = new TextBox();
         private readonly Panel _pnlSensorBar = new Panel();
         private readonly Button _btnSensorProbe = new Button();
+        private readonly Button _btnGoSensors = new Button();
         private readonly Label _lblSensorHint = new Label();
         private DateTime _lastSensorRefresh = DateTime.MinValue;
         private readonly TextBox _txtStatus = new TextBox();
@@ -1430,15 +1431,28 @@ namespace OpenMIFS
 
             _tabs.Location = new Point(12, 516);
             _tabs.Size = new Size(456, 150);
-            _tabs.Font = _fontUi8;
+            _tabs.Font = _fontUi;
             _tabs.TabPages.Add(pageStatus);
             _tabs.TabPages.Add(_tabSensors);
-            _tabs.SelectedIndex = 0;
+            _tabs.SelectedIndex = 1;   // 默认停在「传感器」页：标签太不显眼，用户反馈"找不到入口"
             _tabs.SelectedIndexChanged += delegate
             {
                 if (_tabs.SelectedTab == _tabSensors) RefreshSensors();
             };
             Controls.Add(_tabs);
+
+            // 底部行再加一个显眼的「传感器」按钮，一键跳到那一页
+            _btnGoSensors.Text = "传感器";
+            _btnGoSensors.Location = new Point(272, 671);
+            _btnGoSensors.Size = new Size(96, 28);
+            _btnGoSensors.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+            _btnGoSensors.Click += delegate
+            {
+                Log.Info("按钮进入传感器页");
+                _tabs.SelectedIndex = _tabs.TabPages.IndexOf(_tabSensors);
+                RefreshSensors();
+            };
+            Controls.Add(_btnGoSensors);
 
             // 底部
             _chkAuto.Text = "自动刷新";
@@ -1730,6 +1744,7 @@ namespace OpenMIFS
                 Log.Info("开始 OSD 诊断");
                 string text = Osd.Diagnose();
                 _txtStatus.Text = text;
+                _tabs.SelectedIndex = 0;   // 诊断结果写在「状态」页，自动切过去让用户看到
                 MessageBox.Show(this,
                     "诊断完成，已写入：\r\n" + Path.Combine(Log.Folder, "osd-diagnose.txt") +
                     "\r\n\r\n内容已同时显示在下方状态面板。",
