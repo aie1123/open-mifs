@@ -299,8 +299,14 @@ Windows 自带的 `%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\csc.exe` �
 **构建的两个坑（已在脚本里处理）**
 
 - C# 源码与 `.ps1` 必须带 **UTF-8 BOM**，否则 `csc` / Windows PowerShell 5.1 会按系统代码页解析，中文全乱。
-  `build.ps1` 会检测并自动补 BOM；`.gitattributes` 固定了换行符。
+  `build.ps1` 会检测并自动补 BOM；`.gitattributes` 固定了换行符；CI 也会拒绝缺 BOM 的源码。
 - 该 `csc` 只支持 **C# 5**，所以源码里不能用字符串插值、`?.`、`nameof` 等新语法。
+
+> ⚠️ **构建是"尺寸稳定"而不是"字节一致"**：系统自带的
+> `csc.exe`（.NET Framework 4.8）不认 `/deterministic`，PE 头里会写入编译时间和随机 MVID，
+> 所以本地产物与 CI 产物**大小完全相同、SHA256 必然不同**。
+> 想核对"CI 里的 exe 就是这份源码编的"，请对比**字节数 + 文件版本 + 行为**，
+> 不要拿 SHA256 对比。
 
 想本地换图标（自用，不入库）：
 
