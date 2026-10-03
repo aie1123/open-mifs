@@ -673,7 +673,19 @@ namespace OpenMIFS
                     string tempText = "未实现";
                     string tempNote = note;
                     bool tempOk = false;
-                    if (rel.TryGetValue(did, out c2))
+                    bool paired = rel.TryGetValue(did, out c2);
+                    if (!paired && rel.Count > 0)
+                    {
+                        // DeviceId 对不上（不同 Windows 版本的取值格式不一致）→ 唯一一条就直接用
+                        foreach (KeyValuePair<string, ManagementBaseObject> kv in rel)
+                        {
+                            c2 = kv.Value;
+                            paired = true;
+                            break;
+                        }
+                        if (paired && rel.Count > 1) paired = false;   // 多盘又对不上就不猜
+                    }
+                    if (paired)
                     {
                         int temp = Int(c2["Temperature"]);
                         int wear = Int(c2["Wear"]);
@@ -681,29 +693,29 @@ namespace OpenMIFS
                         tempText = (temp > 0 ? temp.ToString(CultureInfo.InvariantCulture) + " ℃" : "未知")
                                  + "  磨损 " + wear.ToString(CultureInfo.InvariantCulture)
                                  + (hours > 0 ? "  通电 " + hours.ToString(CultureInfo.InvariantCulture) + " h" : "");
-                        tempNote = note + " + WMI StorageReliabilityCounter";
-                        tempOk = true;
+                        tempNote = note + " + WMI StorageReliabilityCounter（共 "
+                            + rel.Count.ToString(CultureInfo.InvariantCulture) + " 条）";
+                        tempOk = temp > 0;
                     }
                     else
                     {
-                        // WMI 可靠性计数器拿不到（未提权 / 该盘不支持）→ 试 IOCTL 温度属性
+                        // WMI 拿不到 → 依次试：温度属性 IOCTL → NVMe 健康日志 IOCTL
                         int idx;
                         if (!int.TryParse(did, out idx)) idx = 0;
-                        int? io = DiskTemperatureIoctl(idx);
+                        List<string> why = new List<string>();
+                        why.Add("可靠性计数器 " + rel.Count.ToString(CultureInfo.InvariantCulture) + " 条"
+                            + (relError.Length > 0 ? "（" + relError + "）" : "，DeviceId 没配上"));
+                        int? io = DiskTemperatureIoctl(idx, why);
+                        if (!io.HasValue) io = NvmeTemperatureIoctl(idx, why);
                         if (io.HasValue)
                         {
                             tempText = io.Value.ToString(CultureInfo.InvariantCulture) + " ℃";
-                            tempNote = note + " + IOCTL_STORAGE_QUERY_PROPERTY（温度属性）";
+                            tempNote = note + " + IOCTL（" + string.Join("；", why.ToArray()) + "）";
                             tempOk = true;
-                        }
-                        else if (relError.Length > 0)
-                        {
-                            tempText = "需要管理员";
-                            tempNote = note + "（WMI：" + relError + "；IOCTL 也没成功，见日志）";
                         }
                         else
                         {
-                            tempNote = note + "（该盘没有可靠性计数器，IOCTL 也没读到）";
+                            tempNote = note + "（" + string.Join("；", why.ToArray()) + "）";
                         }
                     }
 
@@ -861,8 +873,8 @@ namespace OpenMIFS
 
         /// <summary>读物理盘温度：WMI 可靠性计数器不可用时的兜底通道（同样需要管理员）。
         /// 两种属性都试：StorageDeviceTemperatureProperty(22) → StorageAdapterTemperatureProperty(21)，
-        /// 并对单位做兜底判断（有的驱动给开尔文）。</summary>
-        private static int? DiskTemperatureIoctl(int driveIndex)
+        /// 并对单位做兜底判断（有的驱动给开尔文）。失败原因写进 why，供界面直接显示。</summary>
+        private static int? DiskTemperatureIoctl(int driveIndex, List<string> why)
         {
             IntPtr h = IntPtr.Zero, inBuf = IntPtr.Zero, outBuf = IntPtr.Zero;
             try
@@ -871,8 +883,9 @@ namespace OpenMIFS
                     GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
                 if (h == new IntPtr(-1))
                 {
-                    Log.Warn("传感器：打开 PhysicalDrive" + driveIndex.ToString(CultureInfo.InvariantCulture)
-                        + " 失败（需要管理员）err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                    int err = Marshal.GetLastWin32Error();
+                    why.Add("打不开 PhysicalDrive" + driveIndex.ToString(CultureInfo.InvariantCulture) + " err=" + err.ToString(CultureInfo.InvariantCulture));
+                    Log.Warn("传感器：打开 PhysicalDrive" + driveIndex.ToString(CultureInfo.InvariantCulture) + " 失败 err=" + err.ToString(CultureInfo.InvariantCulture));
                     return null;
                 }
 
@@ -890,14 +903,15 @@ namespace OpenMIFS
                     uint ret = 0;
                     if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, inBuf, 16, outBuf, 1024, out ret, IntPtr.Zero))
                     {
-                        Log.Info("传感器：磁盘温度 IOCTL property=" + props[p].ToString(CultureInfo.InvariantCulture)
-                            + " 失败 err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                        int err = Marshal.GetLastWin32Error();
+                        why.Add("温度属性 " + props[p].ToString(CultureInfo.InvariantCulture) + " err=" + err.ToString(CultureInfo.InvariantCulture));
+                        Log.Info("传感器：磁盘温度 IOCTL property=" + props[p].ToString(CultureInfo.InvariantCulture) + " 失败 err=" + err.ToString(CultureInfo.InvariantCulture));
                         continue;
                     }
                     int infoCount = Marshal.ReadInt16(outBuf, 12);       // STORAGE_TEMPERATURE_DATA_DESCRIPTOR.InfoCount
                     if (infoCount <= 0)
                     {
-                        Log.Info("传感器：磁盘温度 IOCTL property=" + props[p].ToString(CultureInfo.InvariantCulture) + " 成功但 InfoCount=0");
+                        why.Add("温度属性 " + props[p].ToString(CultureInfo.InvariantCulture) + " 成功但 InfoCount=0");
                         continue;
                     }
                     short raw = Marshal.ReadInt16(outBuf, 24 + 2);       // Info[0].Temperature
@@ -909,16 +923,85 @@ namespace OpenMIFS
                             + " → " + t.ToString(CultureInfo.InvariantCulture) + " ℃（原始 " + raw.ToString(CultureInfo.InvariantCulture) + "）");
                         return t;
                     }
-                    Log.Info("传感器：磁盘温度 IOCTL property=" + props[p].ToString(CultureInfo.InvariantCulture)
-                        + " 返回值不合理：原始 " + raw.ToString(CultureInfo.InvariantCulture));
+                    why.Add("温度属性 " + props[p].ToString(CultureInfo.InvariantCulture) + " 值不合理(" + raw.ToString(CultureInfo.InvariantCulture) + ")");
                 }
                 return null;
             }
-            catch (Exception ex) { Log.Ex("传感器：磁盘温度 IOCTL 异常", ex); return null; }
+            catch (Exception ex) { why.Add("温度属性异常 " + ex.Message); Log.Ex("传感器：磁盘温度 IOCTL 异常", ex); return null; }
             finally
             {
                 if (inBuf != IntPtr.Zero) Marshal.FreeHGlobal(inBuf);
                 if (outBuf != IntPtr.Zero) Marshal.FreeHGlobal(outBuf);
+                if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
+            }
+        }
+
+        // ─────────────── NVMe 专用通道：IOCTL_STORAGE_QUERY_PROPERTY + NVMe 健康日志（SMART/Health, log page 0x02）
+        // Windows 上读 NVMe 温度最通用的一条路（磁盘工具普遍用它）：健康日志第 1~2 字节是开尔文温度。
+        private const int StorageDeviceProtocolSpecificProperty = 20;
+        private const int ProtocolTypeNvme = 3;
+        private const int NvmeDataTypeLogPage = 2;
+        private const int NvmeLogPageHealthInfo = 0x02;
+
+        private static int? NvmeTemperatureIoctl(int driveIndex, List<string> why)
+        {
+            const int QuerySize = 12;          // STORAGE_PROPERTY_QUERY
+            const int ProtoSize = 40;          // STORAGE_PROTOCOL_SPECIFIC_DATA
+            const int DataSize = 512;          // NVMe 健康日志（512 字节足够）
+            const int Total = QuerySize + ProtoSize + DataSize;
+
+            IntPtr h = IntPtr.Zero, buf = IntPtr.Zero;
+            try
+            {
+                h = CreateFileW(@"\\.\PhysicalDrive" + driveIndex.ToString(CultureInfo.InvariantCulture),
+                    GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (h == new IntPtr(-1))
+                {
+                    why.Add("NVMe: 打不开盘 err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                    return null;
+                }
+
+                buf = Marshal.AllocHGlobal(Total);
+                for (int i = 0; i < Total; i++) Marshal.WriteByte(buf, i, 0);
+
+                Marshal.WriteInt32(buf, 0, StorageDeviceProtocolSpecificProperty);  // PropertyId
+                Marshal.WriteInt32(buf, 4, 0);                                      // QueryType = PropertyStandardQuery
+
+                int p = QuerySize;
+                Marshal.WriteInt32(buf, p + 0, ProtocolTypeNvme);            // ProtocolType
+                Marshal.WriteInt32(buf, p + 4, NvmeDataTypeLogPage);         // DataType
+                Marshal.WriteInt32(buf, p + 8, NvmeLogPageHealthInfo);       // ProtocolDataRequestValue = 健康日志
+                Marshal.WriteInt32(buf, p + 12, 0);                          // SubValue
+                Marshal.WriteInt32(buf, p + 16, ProtoSize);                  // ProtocolDataOffset（相对本结构开头）
+                Marshal.WriteInt32(buf, p + 20, DataSize);                   // ProtocolDataLength
+                Marshal.WriteInt32(buf, p + 24, 0);                          // FixedProtocolReturnData
+
+                uint ret = 0;
+                if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, buf, (uint)Total, buf, (uint)Total, out ret, IntPtr.Zero))
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    why.Add("NVMe 健康日志 err=" + err.ToString(CultureInfo.InvariantCulture));
+                    Log.Info("传感器：NVMe 健康日志 IOCTL 失败 err=" + err.ToString(CultureInfo.InvariantCulture));
+                    return null;
+                }
+
+                int dataOff = QuerySize + ProtoSize;
+                int kelvin = (int)Marshal.ReadByte(buf, dataOff + 1) | ((int)Marshal.ReadByte(buf, dataOff + 2) << 8);
+                int critical = Marshal.ReadByte(buf, dataOff + 0);
+                int t = kelvin > 0 ? (int)Math.Round(kelvin - 273.15) : 0;
+                if (t > 0 && t < 120)
+                {
+                    Log.Info("传感器：磁盘温度来自 NVMe 健康日志 → " + t.ToString(CultureInfo.InvariantCulture)
+                        + " ℃（原始 " + kelvin.ToString(CultureInfo.InvariantCulture) + " K，critical_warning=" + critical.ToString(CultureInfo.InvariantCulture) + "）");
+                    return t;
+                }
+                why.Add("NVMe 健康日志温度不合理(" + kelvin.ToString(CultureInfo.InvariantCulture) + " K)");
+                return null;
+            }
+            catch (Exception ex) { why.Add("NVMe 异常 " + ex.Message); Log.Ex("传感器：NVMe 健康日志异常", ex); return null; }
+            finally
+            {
+                if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
                 if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
             }
         }
