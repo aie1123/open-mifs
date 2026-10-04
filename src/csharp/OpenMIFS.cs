@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.4.4.0")]
-[assembly: AssemblyFileVersion("0.4.4.0")]
+[assembly: AssemblyVersion("0.5.0.0")]
+[assembly: AssemblyFileVersion("0.5.0.0")]
 
 namespace OpenMIFS
 {
@@ -1297,6 +1297,9 @@ namespace OpenMIFS
             _timer.Tick += delegate { if (_chkAuto.Checked) RefreshAll(); };
             _timer.Start();
 
+            TrayText.Load();
+            SyncTrayUi();
+
             _osdHintMode = Settings.Get("osd_hint", "auto");
             _hintTimer.Interval = 350;   // 等官方 OSD 先画出来再决定要不要显示自带的
             _hintTimer.Tick += delegate { _hintTimer.Stop(); FlushPendingHint(); };
@@ -1630,6 +1633,47 @@ namespace OpenMIFS
             _lblDpi.AutoSize = false;
             gOsd.Controls.Add(_lblDpi);
 
+            // ── 托盘悬停提示：白名单勾选 + 最坏情况预算（放不下的直接拒绝勾选）
+            _gbTray = NewGroup("托盘悬停提示（按最坏宽度限额）", 516, 190);
+            _lstTray.CheckOnClick = true;
+            _lstTray.Location = new Point(12, 20);
+            _lstTray.Size = new Size(214, 116);
+            _lstTray.Font = new Font("Microsoft YaHei UI", 9F);
+            _lstTray.IntegralHeight = false;
+            _lstTray.ItemCheck += OnTrayItemCheck;
+            for (int i = 0; i < TrayText.All.Length; i++)
+            {
+                TrayText.Item it = TrayText.All[i];
+                _lstTray.Items.Add(it.Label + "（≤" + it.Worst.ToString(CultureInfo.InvariantCulture) + "）");
+            }
+            _gbTray.Controls.Add(_lstTray);
+
+            _lblTrayPreview.Location = new Point(234, 20);
+            _lblTrayPreview.Size = new Size(210, 66);
+            _lblTrayPreview.Font = _fontUi8;
+            _lblTrayPreview.BackColor = Color.FromArgb(246, 246, 248);
+            _lblTrayPreview.BorderStyle = BorderStyle.FixedSingle;
+            _lblTrayPreview.TextAlign = ContentAlignment.TopLeft;
+            _gbTray.Controls.Add(_lblTrayPreview);
+
+            _lblTrayBudget.Location = new Point(234, 88);
+            _lblTrayBudget.Size = new Size(210, 18);
+            _lblTrayBudget.Font = _fontUi8;
+            _lblTrayBudget.TextAlign = ContentAlignment.MiddleLeft;
+            _gbTray.Controls.Add(_lblTrayBudget);
+
+            _btnTrayDefault.Text = "恢复默认";
+            _btnTrayDefault.Location = new Point(234, 108);
+            _btnTrayDefault.Size = new Size(96, 28);
+            _btnTrayDefault.Font = new Font("Microsoft YaHei UI", 9F);
+            _btnTrayDefault.Click += OnTrayDefaultClick;
+            _gbTray.Controls.Add(_btnTrayDefault);
+
+            _lblTrayHint.Location = new Point(12, 142);
+            _lblTrayHint.Size = new Size(432, 18);
+            _lblTrayHint.Font = _fontUi8;
+            _lblTrayHint.Text = "上限 62 字符（Win32 单行）：放不下的项不允许勾选，请改用右键菜单查看。";
+            _gbTray.Controls.Add(_lblTrayHint);
             // ── 右列：状态 + 传感器，直接摆在首页，键值行显示，随窗口缩放
             _pnlSensorBar.Dock = DockStyle.Bottom;
             _pnlSensorBar.Height = 34;
@@ -1734,6 +1778,13 @@ namespace OpenMIFS
         private readonly Dictionary<string, KvRow> _statusRows = new Dictionary<string, KvRow>();
         private readonly List<string> _sensorOrder = new List<string>();
         private readonly Dictionary<string, KvRow> _sensorRows = new Dictionary<string, KvRow>();
+        private GroupBox _gbTray;
+        private readonly CheckedListBox _lstTray = new CheckedListBox();
+        private readonly Label _lblTrayPreview = new Label();
+        private readonly Label _lblTrayBudget = new Label();
+        private readonly Label _lblTrayHint = new Label();
+        private readonly Button _btnTrayDefault = new Button();
+        private bool _trayUiSync;
         private readonly ToolTip _tips = new ToolTip();
 
         /// <summary>按需创建一行（灰色小标签 + 加粗数值）。</summary>
@@ -1831,7 +1882,73 @@ namespace OpenMIFS
             RenderKeyValues(host, order, map, text);
         }
 
+        // ── 托盘提示设置
+        private void SyncTrayUi()
+        {
+            _trayUiSync = true;
+            try
+            {
+                for (int i = 0; i < TrayText.All.Length; i++)
+                    _lstTray.SetItemChecked(i, TrayText.IsSelected(TrayText.All[i].Id));
+            }
+            finally { _trayUiSync = false; }
+            RefreshTrayPreview();
+        }
+
+        private void RefreshTrayPreview()
+        {
+            string s = TrayText.Build();
+            _lblTrayPreview.Text = s.Length > 0 ? s : "（当前没有可显示的项目）";
+            _lblTrayBudget.Text = "最坏情况 " + TrayText.WorstTotal().ToString(CultureInfo.InvariantCulture)
+                + "/" + TrayText.MaxChars.ToString(CultureInfo.InvariantCulture) + " 字符"
+                + "　实际 " + s.Length.ToString(CultureInfo.InvariantCulture) + " 字符";
+        }
+
+        private void OnTrayItemCheck(object sender, ItemCheckEventArgs e)
+        {
+            if (_trayUiSync) return;
+            TrayText.Item it = TrayText.All[e.Index];
+            bool want = e.NewValue == CheckState.Checked;
+            if (want && !TrayText.CanAdd(it.Id))
+            {
+                e.NewValue = CheckState.Unchecked;      // 放不下就不让勾
+                int withIt = TrayText.WorstTotal() + it.Worst + TrayText.Separator.Length;
+                _lblTrayHint.Text = "「" + it.Label + "」最坏要 " + it.Worst.ToString(CultureInfo.InvariantCulture)
+                    + " 字符，加上会到 " + withIt.ToString(CultureInfo.InvariantCulture)
+                    + "（上限 " + TrayText.MaxChars.ToString(CultureInfo.InvariantCulture) + "）→ 先取消一项再勾。";
+                Log.Info("托盘提示：拒绝勾选 " + it.Id + "（最坏 " + withIt.ToString(CultureInfo.InvariantCulture) + " 字符）");
+                return;
+            }
+            if (!TrayText.TrySelect(it.Id, want))
+            {
+                e.NewValue = CheckState.Unchecked;
+                return;
+            }
+            _lblTrayHint.Text = "上限 62 字符（Win32 单行）：放不下的项不允许勾选，请改用右键菜单查看。";
+            RefreshTrayPreview();
+        }
+
+        private void OnTrayDefaultClick(object sender, EventArgs e)
+        {
+            TrayText.ResetDefault();
+            SyncTrayUi();
+            Log.Info("托盘提示：已恢复默认（版本 + 性能模式 + 风扇）");
+        }
+
         // ────────────────────────────────────────────────────── 传感器
+        /// <summary>窗口隐藏时，托盘若勾了 CPU 项就需要数据 —— 只采快照，不碰任何控件。</summary>
+        public void RequestHiddenSensorSnapshot()
+        {
+            if (_sensorBusy) return;
+            _sensorBusy = true;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try { TrayText.CaptureSensorText(Sensors.Render(Sensors.ReadAll())); }
+                catch (Exception ex) { Log.Ex("隐藏态传感器快照失败", ex); }
+                finally { _sensorBusy = false; }
+            });
+        }
+
         /// <summary>读取并渲染传感器（首页直接展示；窗口隐藏到托盘后跳过，省开销）。
         /// 读数放在线程池里做：首次读取要预热 PDH + 走 WMI，约 1~2 秒，
         /// 放 UI 线程上会把窗口卡住，所以读→回到 UI 线程渲染。</summary>
@@ -1886,6 +2003,7 @@ namespace OpenMIFS
                         _sensorBusy = false;
                         if (err != null) { _lblSensorHint.Text = "读取失败：" + err + "（详见日志）"; return; }
                         SetRows(_pnlSensorRows, _sensorOrder, _sensorRows, text);
+                        TrayText.CaptureSensorText(text);
                         _lblSensorHint.Text = hint;
                     });
                 }
@@ -2474,6 +2592,8 @@ namespace OpenMIFS
 
 
             SetRows(_pnlStatusRows, _statusOrder, _statusRows, sb.ToString());
+            TrayText.CaptureStatusText(sb.ToString());
+            if (_gbTray != null) RefreshTrayPreview();
 
             _suppress = false;
             if (!_firstRefreshDone)
@@ -2492,6 +2612,282 @@ namespace OpenMIFS
     }
 
     // ─────────────────────────────────────────────────────────── 托盘宿主
+    // ───────────────────────────────────────────── 托盘悬停提示（白名单 + 最坏情况预算）
+    /// <summary>托盘悬停提示是 Win32 单行字符串，.NET 的 NotifyIcon.Text 上限 63 字符。
+    /// 所以这里**不提供自由模板**，只允许一组"最坏情况下也放得下"的项目：
+    /// 每项登记一个 Worst（该值可能达到的最大宽度），勾选时按预算逐个放行，
+    /// 放不下的项直接拒绝勾选 —— 任何组合都不会溢出，也就不需要对数字做截断。
+    /// 想看的项放不下时，用右键菜单里的详细摘要（无长度限制）看。</summary>
+    internal static class TrayText
+    {
+        public const int MaxChars = 62;          // NotifyIcon.Text 上限 63，留 1 位余量
+        public const string Separator = " · ";
+
+        internal sealed class Item
+        {
+            public string Id;
+            public string Label;
+            public int Worst;                    // 最坏宽度（含前缀与单位）
+            public string Sample;
+        }
+
+        // 只放"单项短、组合可控"的项目；会超长的（内存/磁盘温度/GPU 等）一律不提供
+        public static readonly Item[] All = new Item[]
+        {
+            new Item { Id = "ver",  Label = "版本",     Worst = 8,  Sample = "v0.4.5" },
+            new Item { Id = "mode", Label = "性能模式", Worst = 3,  Sample = "低功耗" },
+            new Item { Id = "fan",  Label = "风扇转速", Worst = 17, Sample = "风扇 65535/65535" },
+            new Item { Id = "cput", Label = "CPU 温度", Worst = 7,  Sample = "CPU 105℃" },
+            new Item { Id = "cpup", Label = "CPU 功耗", Worst = 9,  Sample = "CPU 105.5W" },
+            new Item { Id = "cpuf", Label = "CPU 频率", Worst = 9,  Sample = "CPU 5.55G" },
+            new Item { Id = "cpul", Label = "CPU 负载", Worst = 7,  Sample = "CPU 100%" },
+            new Item { Id = "bat",  Label = "电池电量", Worst = 7,  Sample = "电池 100%" },
+        };
+
+        // 值快照：主窗体刷新时写入，托盘只读（避免两边重复采集）
+        private static readonly Dictionary<string, string> _snap = new Dictionary<string, string>();
+        public static DateTime SnapTime = DateTime.MinValue;
+
+        private static readonly List<string> _selected = new List<string> { "ver", "mode", "fan" };
+
+        public static Item Find(string id)
+        {
+            for (int i = 0; i < All.Length; i++) if (All[i].Id == id) return All[i];
+            return null;
+        }
+
+        /// <summary>已选项目，按 All 的固定顺序（顺序不可调，换取"永不溢出"的保证）。</summary>
+        public static List<string> Selected()
+        {
+            List<string> r = new List<string>();
+            for (int i = 0; i < All.Length; i++) if (_selected.Contains(All[i].Id)) r.Add(All[i].Id);
+            return r;
+        }
+
+        public static bool IsSelected(string id) { return _selected.Contains(id); }
+
+        /// <summary>当前勾选项里是否有依赖传感器采集的（CPU 温度/功耗/频率/负载、电池）。</summary>
+        public static bool NeedsSensors()
+        {
+            return IsSelected("cput") || IsSelected("cpup") || IsSelected("cpuf")
+                || IsSelected("cpul") || IsSelected("bat");
+        }
+
+        /// <summary>这些项目的**最坏情况**总宽（含分隔符）。</summary>
+        public static int WorstTotal(List<string> ids)
+        {
+            if (ids == null || ids.Count == 0) return 0;
+            int n = 0;
+            for (int i = 0; i < ids.Count; i++)
+            {
+                Item it = Find(ids[i]);
+                if (it != null) n += it.Worst;
+            }
+            return n + (ids.Count - 1) * Separator.Length;
+        }
+
+        public static int WorstTotal() { return WorstTotal(Selected()); }
+
+        /// <summary>加入这一项后是否仍在预算内（界面上用来拒绝勾选）。</summary>
+        public static bool CanAdd(string id)
+        {
+            if (IsSelected(id)) return true;
+            List<string> t = Selected();
+            t.Add(id);
+            return WorstTotal(t) <= MaxChars;
+        }
+
+        public static bool TrySelect(string id, bool on)
+        {
+            if (on)
+            {
+                if (!CanAdd(id)) return false;
+                if (!_selected.Contains(id)) _selected.Add(id);
+            }
+            else _selected.Remove(id);
+            Save();
+            return true;
+        }
+
+        public static void ResetDefault()
+        {
+            _selected.Clear();
+            _selected.Add("ver"); _selected.Add("mode"); _selected.Add("fan");
+            Save();
+        }
+
+        public static void Load()
+        {
+            try
+            {
+                string s = Settings.Get("tray_items", "");
+                if (s.Length == 0) return;
+                List<string> ids = new List<string>();
+                string[] parts = s.Split(',');
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    string id = parts[i].Trim().ToLowerInvariant();
+                    if (id.Length == 0) continue;
+                    if (Find(id) == null) { Log.Warn("托盘提示：忽略未知项目 " + id); continue; }
+                    if (!ids.Contains(id)) ids.Add(id);
+                }
+                if (WorstTotal(ids) > MaxChars)
+                {
+                    Log.Warn("托盘提示：配置的组合最坏 " + WorstTotal(ids).ToString(CultureInfo.InvariantCulture)
+                        + " 字符，超过 " + MaxChars.ToString(CultureInfo.InvariantCulture) + " → 回落默认");
+                    return;
+                }
+                _selected.Clear();
+                _selected.AddRange(ids);
+            }
+            catch (Exception ex) { Log.Ex("读取托盘提示配置失败", ex); }
+        }
+
+        public static void Save()
+        {
+            try { Settings.Set("tray_items", string.Join(",", Selected().ToArray())); }
+            catch (Exception ex) { Log.Ex("保存托盘提示配置失败", ex); }
+        }
+
+        // ── 值快照的写入（主窗体调用）
+        private static void Put(string id, string v)
+        {
+            if (string.IsNullOrEmpty(v)) { _snap.Remove(id); return; }
+            Item it = Find(id);
+            if (it != null && v.Length > it.Worst) v = v.Substring(0, it.Worst);   // 兜底，防意外超宽
+            _snap[id] = v;
+        }
+
+        private static bool Bad(string v)
+        {
+            return string.IsNullOrEmpty(v) || v.StartsWith("未实现") || v.StartsWith("不支持")
+                || v.StartsWith("需要管理员") || v == "—" || v == "未知" || v.StartsWith("读取失败");
+        }
+
+        /// <summary>解析"键 : 值"文本（状态面板 / 传感器面板通用）。</summary>
+        private static Dictionary<string, string> Parse(string text)
+        {
+            Dictionary<string, string> d = new Dictionary<string, string>();
+            if (string.IsNullOrEmpty(text)) return d;
+            string[] lines = text.Replace("\r\n", "\n").Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string raw = lines[i];
+                string t = raw.Trim();
+                if (t.Length == 0 || t.StartsWith("==") || t.StartsWith("└")) continue;
+                int c = raw.IndexOf(':');
+                if (c <= 0) continue;
+                string k = raw.Substring(0, c).Trim();
+                string v = raw.Substring(c + 1).Trim();
+                if (k.Length > 0) d[k] = v;
+            }
+            return d;
+        }
+
+        private static double Num(string v)
+        {
+            double d;
+            if (double.TryParse(v.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out d)) return d;
+            return double.NaN;
+        }
+
+        /// <summary>状态面板文本 → 版本 / 模式 / 风扇。</summary>
+        public static void CaptureStatusText(string text)
+        {
+            try
+            {
+                Dictionary<string, string> d = Parse(text);
+                Put("ver", "v" + MifsApp.VersionText);
+
+                string mode;
+                if (d.TryGetValue("性能模式", out mode) && !Bad(mode)) Put("mode", mode); else Put("mode", null);
+
+                string f1, f2;
+                d.TryGetValue("风扇1", out f1);
+                d.TryGetValue("风扇2", out f2);
+                double n1 = Num((f1 ?? "").Replace("RPM", "")), n2 = Num((f2 ?? "").Replace("RPM", ""));
+                if (!double.IsNaN(n1) && n1 > 0 && !double.IsNaN(n2) && n2 > 0)
+                    Put("fan", "风扇 " + n1.ToString("0", CultureInfo.InvariantCulture) + "/" + n2.ToString("0", CultureInfo.InvariantCulture));
+                else Put("fan", null);
+
+                SnapTime = DateTime.Now;
+            }
+            catch (Exception ex) { Log.Ex("托盘快照（状态）失败", ex); }
+        }
+
+        /// <summary>传感器面板文本 → CPU 温度/功耗/频率/负载 + 电池（都压缩成短写法）。</summary>
+        public static void CaptureSensorText(string text)
+        {
+            try
+            {
+                Dictionary<string, string> d = Parse(text);
+
+                string v;
+                if (d.TryGetValue("CPU 温度", out v) && !Bad(v))
+                    Put("cput", "CPU " + v.Replace(" ", ""));
+                else Put("cput", null);
+
+                if (d.TryGetValue("CPU 功耗", out v) && !Bad(v))
+                {
+                    double w = Num(v.Replace("W", ""));
+                    Put("cpup", double.IsNaN(w) ? null : "CPU " + w.ToString("0.0", CultureInfo.InvariantCulture) + "W");
+                }
+                else Put("cpup", null);
+
+                if (d.TryGetValue("CPU 频率", out v) && !Bad(v))
+                {
+                    double g = Num(v.Replace("GHz", "").Replace("MHz", ""));
+                    Put("cpuf", double.IsNaN(g) ? null : "CPU " + g.ToString("0.00", CultureInfo.InvariantCulture) + "G");
+                }
+                else Put("cpuf", null);
+
+                if (d.TryGetValue("CPU 负载", out v) && !Bad(v))
+                {
+                    double p = Num(v.Replace("%", ""));
+                    Put("cpul", double.IsNaN(p) ? null : "CPU " + p.ToString("0", CultureInfo.InvariantCulture) + "%");
+                }
+                else Put("cpul", null);
+
+                if (d.TryGetValue("电池", out v) && !Bad(v))
+                {
+                    string head = v.Split('·')[0].Replace(" ", "");
+                    Put("bat", head.Length > 0 ? "电池 " + head : null);
+                }
+                else Put("bat", null);
+
+                SnapTime = DateTime.Now;
+            }
+            catch (Exception ex) { Log.Ex("托盘快照（传感器）失败", ex); }
+        }
+
+        /// <summary>拼出悬停提示。已被最坏情况预算保证不溢出；这里再做一次稳妥的整项丢弃兜底。</summary>
+        public static string Build()
+        {
+            List<string> parts = new List<string>();
+            List<string> ids = Selected();
+            for (int i = 0; i < ids.Count; i++)
+            {
+                string v;
+                if (_snap.TryGetValue(ids[i], out v) && !string.IsNullOrEmpty(v)) parts.Add(v);
+            }
+            string s = string.Join(Separator, parts.ToArray());
+            while (s.Length > MaxChars && parts.Count > 1)
+            {
+                parts.RemoveAt(parts.Count - 1);          // 整项丢弃，不切数字
+                s = string.Join(Separator, parts.ToArray());
+            }
+            if (s.Length > MaxChars && parts.Count == 1) s = parts[0].Substring(0, MaxChars);
+            return s;
+        }
+
+        /// <summary>当前各项目的实际值（界面预览用）。</summary>
+        public static string PreviewFor(string id)
+        {
+            string v;
+            return _snap.TryGetValue(id, out v) ? v : "";
+        }
+    }
+
     internal sealed class TrayContext : ApplicationContext
     {
         private readonly NotifyIcon _tray = new NotifyIcon();
@@ -2722,11 +3118,11 @@ namespace OpenMIFS
 
                 _miStartup.Checked = Startup.IsEnabled();
 
-                int[] fans = Mifs.GetFans();
-                string tip = "OpenMIFS v" + MifsApp.VersionText;
-                if (pm.HasValue) tip += " · " + ModeMap.Label(pm.Value);
-                if (fans != null) tip += string.Format(CultureInfo.InvariantCulture, " · 风扇 {0}/{1} RPM", fans[0], fans[1]);
-                if (tip.Length > 62) tip = tip.Substring(0, 62);
+                // 窗口隐藏时主窗体不刷新传感器 → 勾了 CPU 项就按需后台采一轮快照
+                if (!_form.Visible && TrayText.NeedsSensors() && (DateTime.Now - TrayText.SnapTime).TotalSeconds > 8)
+                    _form.RequestHiddenSensorSnapshot();
+                string tip = TrayText.Build();
+                if (tip.Length == 0) tip = "OpenMIFS v" + MifsApp.VersionText;
                 _tray.Text = tip;
             }
             catch (Exception ex) { Log.Ex("刷新托盘失败", ex); }
