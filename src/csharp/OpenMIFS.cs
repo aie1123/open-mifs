@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.5.2.0")]
-[assembly: AssemblyFileVersion("0.5.2.0")]
+[assembly: AssemblyVersion("0.5.3.0")]
+[assembly: AssemblyFileVersion("0.5.3.0")]
 
 namespace OpenMIFS
 {
@@ -1284,7 +1284,7 @@ namespace OpenMIFS
         public MainForm()
         {
             Text = "OpenMIFS v" + MifsApp.VersionText + " — 同方 MIFS 控制台";
-            ClientSize = new Size(940, 775);
+            ClientSize = new Size(940, 815);
             MinimumSize = new Size(700, 560);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.Sizable;   // 可拖动缩放：右列数据区跟着窗口变大
@@ -1301,7 +1301,9 @@ namespace OpenMIFS
 
             TrayText.Load();
             TrayIcon.Load();
+            TrayIcon.LoadThresholds();
             SyncTrayUi();
+            SyncTrayThresholds();
 
             _osdHintMode = Settings.Get("osd_hint", "auto");
             _hintTimer.Interval = 350;   // 等官方 OSD 先画出来再决定要不要显示自带的
@@ -1637,7 +1639,7 @@ namespace OpenMIFS
             gOsd.Controls.Add(_lblDpi);
 
             // ── 托盘悬停提示：白名单勾选 + 最坏情况预算（放不下的直接拒绝勾选）
-            _gbTray = NewGroup("托盘悬停提示（按最坏宽度限额）", 516, 190);
+            _gbTray = NewGroup("托盘悬停提示（按最坏宽度限额）", 516, 218);
             _lstTray.CheckOnClick = true;
             _lstTray.Location = new Point(12, 20);
             _lstTray.Size = new Size(214, 116);
@@ -1688,10 +1690,36 @@ namespace OpenMIFS
             _cmbTrayIcon.SelectedIndexChanged += OnTrayIconKindChanged;
             _gbTray.Controls.Add(_cmbTrayIcon);
 
-            _lblTrayHint.Location = new Point(212, 142);
-            _lblTrayHint.Size = new Size(234, 18);
+            _lblTrayTh.Location = new Point(12, 168);
+            _lblTrayTh.Size = new Size(58, 18);
+            _lblTrayTh.Font = _fontUi8;
+            _lblTrayTh.Text = "变色阈值";
+            _lblTrayTh.TextAlign = ContentAlignment.MiddleLeft;
+            _gbTray.Controls.Add(_lblTrayTh);
+
+            string[] thUnit = new string[] { "温度", "功耗", "负载" };
+            for (int i = 0; i < 3; i++)
+            {
+                _lblTrayThUnit[i].Location = new Point(72 + i * 124, 168);
+                _lblTrayThUnit[i].Size = new Size(30, 18);
+                _lblTrayThUnit[i].Font = _fontUi8;
+                _lblTrayThUnit[i].Text = thUnit[i];
+                _lblTrayThUnit[i].TextAlign = ContentAlignment.MiddleLeft;
+                _gbTray.Controls.Add(_lblTrayThUnit[i]);
+
+                _txtTrayTh[i].Location = new Point(102 + i * 124, 166);
+                _txtTrayTh[i].Size = new Size(86, 21);
+                _txtTrayTh[i].Font = _fontUi8;
+                _txtTrayTh[i].Tag = TrayIcon.Kinds[i + 1];      // cput / cpup / cpul
+                _txtTrayTh[i].Text = TrayIcon.ThresholdText(TrayIcon.Kinds[i + 1]);
+                _txtTrayTh[i].Leave += OnTrayThresholdLeave;
+                _gbTray.Controls.Add(_txtTrayTh[i]);
+            }
+
+            _lblTrayHint.Location = new Point(12, 192);
+            _lblTrayHint.Size = new Size(432, 18);
             _lblTrayHint.Font = _fontUi8;
-            _lblTrayHint.Text = "上限 62 字符；图标上最多画 3 个字符";
+            _lblTrayHint.Text = "阈值：三个升序数值（逗号分隔），如 55,70,85 = 绿/琥珀/橙/红四档分界";
             _gbTray.Controls.Add(_lblTrayHint);
             // ── 右列：状态 + 传感器，直接摆在首页，键值行显示，随窗口缩放
             _pnlSensorBar.Dock = DockStyle.Bottom;
@@ -1805,6 +1833,9 @@ namespace OpenMIFS
         private readonly Button _btnTrayDefault = new Button();
         private readonly Label _lblTrayIcon = new Label();
         private readonly ComboBox _cmbTrayIcon = new ComboBox();
+        private readonly Label _lblTrayTh = new Label();
+        private readonly Label[] _lblTrayThUnit = new Label[] { new Label(), new Label(), new Label() };
+        private readonly TextBox[] _txtTrayTh = new TextBox[] { new TextBox(), new TextBox(), new TextBox() };
         private bool _trayUiSync;
         private bool _mifsTempPowerChecked;
         private readonly ToolTip _tips = new ToolTip();
@@ -1962,10 +1993,36 @@ namespace OpenMIFS
             if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);   // 托盘立刻重画
         }
 
+        private void OnTrayThresholdLeave(object sender, EventArgs e)
+        {
+            if (_trayUiSync) return;
+            TextBox box = sender as TextBox;
+            if (box == null) return;
+            string kind = box.Tag as string;
+            string reason;
+            if (!TrayIcon.SaveThresholds(kind, box.Text, out reason))
+            {
+                _lblTrayHint.Text = "阈值没保存：" + reason + " → 已还原为 " + TrayIcon.ThresholdText(kind);
+                box.Text = TrayIcon.ThresholdText(kind);
+                return;
+            }
+            _lblTrayHint.Text = "阈值已保存：" + (kind == "cput" ? "温度" : (kind == "cpup" ? "功耗" : "负载"))
+                + " = " + TrayIcon.ThresholdText(kind) + "（图标下次刷新即生效）";
+            if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);
+            RefreshTrayPreview();
+        }
+
+        private void SyncTrayThresholds()
+        {
+            for (int i = 0; i < 3; i++) _txtTrayTh[i].Text = TrayIcon.ThresholdText(TrayIcon.Kinds[i + 1]);
+        }
+
         private void OnTrayDefaultClick(object sender, EventArgs e)
         {
             TrayText.ResetDefault();
+            TrayIcon.ResetThresholds();
             SyncTrayUi();
+            SyncTrayThresholds();
             Log.Info("托盘提示：已恢复默认（版本 + 性能模式 + 风扇）");
         }
 
@@ -2950,15 +3007,47 @@ namespace OpenMIFS
     {
         [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr h);
         [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+        [DllImport("user32.dll")] private static extern uint GetDpiForSystem();
         private const int SM_CXSMICON = 49;
+
+        /// <summary>托盘小图标的**物理**像素尺寸。用 GetDpiForSystem 自己算，
+        /// 不依赖进程的 DPI 感知状态（否则 125% 缩放下会按 16px 画再被系统拉伸，字就糊了）。</summary>
+        private static int IconSize()
+        {
+            int a = 16, b = 16;
+            try
+            {
+                uint dpi = GetDpiForSystem();
+                if (dpi >= 96 && dpi <= 480) a = (int)Math.Round(16.0 * dpi / 96.0);
+            }
+            catch { }
+            try { b = GetSystemMetrics(SM_CXSMICON); } catch { b = 16; }
+
+            // 两个来源取较大者；再兜一个下限 20。
+            // 理由：托盘实际尺寸若比我们画的大，系统会**放大**（明显糊）；比我们画的小则是**缩小**（只轻微软）。
+            // 实测本机 GetDpiForSystem 返回 96（注册表 AppliedDPI=120），只信一个来源会画成 16px。
+            int size = Math.Max(a, b);
+            if (size < 20) size = 20;
+            if (size > 32) size = 32;
+            return size;
+        }
 
         /// <summary>可选数据源（id 与 TrayText 的项目 id 一致；none = 保持程序图标）。</summary>
         public static readonly string[] Kinds = new string[] { "none", "cput", "cpup", "cpul" };
         public static readonly string[] KindLabels = new string[] { "无（程序图标）", "CPU 温度", "CPU 功耗", "CPU 负载" };
 
+        // 三档阈值可配置（settings.txt 里的 tray_icon_t / _p / _l，逗号分隔三个升序数值）
+        private static double[] _tTemp = new double[] { 55, 70, 85 };
+        private static double[] _tPower = new double[] { 15, 30, 45 };
+        private static double[] _tLoad = new double[] { 25, 50, 80 };
+        public static readonly double[] DefaultTemp = new double[] { 55, 70, 85 };
+        public static readonly double[] DefaultPower = new double[] { 15, 30, 45 };
+        public static readonly double[] DefaultLoad = new double[] { 25, 50, 80 };
+
         private static string _kind = "cput";
         private static string _lastKey = "";
         private static bool _loggedFirst;
+        private static int _lastLoggedLevel = -1;
         private static bool _loggedNoData;
         private static Icon _ownIcon;          // 自己创建的图标，换新时释放
 
@@ -2974,6 +3063,99 @@ namespace OpenMIFS
                 _kind = "cput";
             }
             catch (Exception ex) { Log.Ex("读取托盘图标配置失败", ex); }
+        }
+
+        /// <summary>读三档阈值。格式："a,b,c"（三个升序正数）；不合法则保留原值并记日志。</summary>
+        private static double[] ParseThresholds(string key, double[] fallback)
+        {
+            try
+            {
+                string s = Settings.Get(key, "");
+                if (s.Trim().Length == 0) return fallback;
+                string[] parts = s.Split(new char[] { ',' });
+                if (parts.Length != 3)
+                {
+                    Log.Warn("托盘图标：阈值 " + key + " 需要 3 个数，收到 " + parts.Length + " 个 → 回落默认 " + Text(fallback) + "（已写回）");
+                    try { Settings.Set(key, Text(fallback)); } catch { }
+                    return fallback;
+                }
+                double[] r = new double[3];
+                for (int i = 0; i < 3; i++)
+                {
+                    if (!double.TryParse(parts[i].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out r[i]) || r[i] <= 0)
+                    {
+                        Log.Warn("托盘图标：阈值 " + key + " 含非法数值「" + parts[i].Trim() + "」→ 回落默认 " + Text(fallback) + "（已写回）");
+                        try { Settings.Set(key, Text(fallback)); } catch { }
+                        return fallback;
+                    }
+                }
+                if (!(r[0] < r[1] && r[1] < r[2]))
+                {
+                    Log.Warn("托盘图标：阈值 " + key + " 必须严格递增（" + s.Trim() + "）→ 回落默认 " + Text(fallback) + "（已写回）");
+                    try { Settings.Set(key, Text(fallback)); } catch { }
+                    return fallback;
+                }
+                return r;
+            }
+            catch (Exception ex) { Log.Ex("读取托盘图标阈值失败 " + key, ex); return fallback; }
+        }
+
+        public static void LoadThresholds()
+        {
+            _tTemp = ParseThresholds("tray_icon_t", DefaultTemp);
+            _tPower = ParseThresholds("tray_icon_p", DefaultPower);
+            _tLoad = ParseThresholds("tray_icon_l", DefaultLoad);
+            Log.Info("托盘图标：变色阈值 温度=" + Text(_tTemp) + " 功耗=" + Text(_tPower) + " 负载=" + Text(_tLoad));
+        }
+
+        private static string Text(double[] a)
+        {
+            return a[0].ToString("0.##", CultureInfo.InvariantCulture) + ","
+                 + a[1].ToString("0.##", CultureInfo.InvariantCulture) + ","
+                 + a[2].ToString("0.##", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>某个指标的当前阈值文本（界面显示用）。</summary>
+        public static string ThresholdText(string kind)
+        {
+            if (kind == "cput") return Text(_tTemp);
+            if (kind == "cpup") return Text(_tPower);
+            return Text(_tLoad);
+        }
+
+        /// <summary>保存某个指标的阈值；不合法返回 false（界面据此回滚输入框）。</summary>
+        public static bool SaveThresholds(string kind, string text, out string reason)
+        {
+            reason = "";
+            string key = kind == "cput" ? "tray_icon_t" : (kind == "cpup" ? "tray_icon_p" : "tray_icon_l");
+            double[] cur = kind == "cput" ? _tTemp : (kind == "cpup" ? _tPower : _tLoad);
+            double[] fallback = kind == "cput" ? DefaultTemp : (kind == "cpup" ? DefaultPower : DefaultLoad);
+            string[] parts = (text ?? "").Split(new char[] { ',' });
+            if (parts.Length != 3) { reason = "需要 3 个数（逗号分隔）"; return false; }
+            double[] r = new double[3];
+            for (int i = 0; i < 3; i++)
+            {
+                if (!double.TryParse(parts[i].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out r[i]) || r[i] <= 0)
+                { reason = "「" + parts[i].Trim() + "」不是正数"; return false; }
+            }
+            if (!(r[0] < r[1] && r[1] < r[2])) { reason = "三个数必须严格递增"; return false; }
+            if (kind == "cput") _tTemp = r; else if (kind == "cpup") _tPower = r; else _tLoad = r;
+            try { Settings.Set(key, Text(r)); } catch (Exception ex) { Log.Ex("保存托盘图标阈值失败", ex); }
+            Log.Info("托盘图标：阈值 " + kind + " 改为 " + Text(r) + (cur == fallback ? "" : ""));
+            return true;
+        }
+
+        /// <summary>恢复默认阈值。</summary>
+        public static void ResetThresholds()
+        {
+            _tTemp = DefaultTemp; _tPower = DefaultPower; _tLoad = DefaultLoad;
+            try
+            {
+                Settings.Set("tray_icon_t", Text(_tTemp));
+                Settings.Set("tray_icon_p", Text(_tPower));
+                Settings.Set("tray_icon_l", Text(_tLoad));
+            }
+            catch (Exception ex) { Log.Ex("保存默认阈值失败", ex); }
         }
 
         public static void Save(string kind)
@@ -3003,18 +3185,11 @@ namespace OpenMIFS
             double d;
             if (!double.TryParse(num, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) return null;
 
-            if (kind == "cput")
-            {
-                if (d < 55) level = 1; else if (d < 70) level = 2; else if (d < 85) level = 3; else level = 4;
-            }
-            else if (kind == "cpup")
-            {
-                if (d < 15) level = 1; else if (d < 30) level = 2; else if (d < 45) level = 3; else level = 4;
-            }
-            else
-            {
-                if (d < 25) level = 1; else if (d < 50) level = 2; else if (d < 80) level = 3; else level = 4;
-            }
+            double[] th = kind == "cput" ? _tTemp : (kind == "cpup" ? _tPower : _tLoad);
+            level = 1;
+            if (d >= th[0]) level = 2;
+            if (d >= th[1]) level = 3;
+            if (d >= th[2]) level = 4;
             return ((int)Math.Round(d)).ToString(CultureInfo.InvariantCulture);
         }
 
@@ -3103,12 +3278,11 @@ namespace OpenMIFS
                     return;
                 }
                 _loggedNoData = false;
-                string key = _kind + "|" + text;
+                string key = _kind + "|" + text + "|" + level;      // 档位变化也要重画并留痕
                 if (key == _lastKey) return;
                 _lastKey = key;
 
-                int size = GetSystemMetrics(SM_CXSMICON);
-                if (size < 16) size = 16;
+                int size = IconSize();
 
                 using (Bitmap bmp = Render(text, level, size))
                 {
@@ -3121,9 +3295,10 @@ namespace OpenMIFS
                             if (_ownIcon != null) _ownIcon.Dispose();
                             _ownIcon = clone;
                             tray.Icon = clone;
-                            if (!_loggedFirst)
+                            if (!_loggedFirst || level != _lastLoggedLevel)
                             {
                                 _loggedFirst = true;
+                                _lastLoggedLevel = level;
                                 Log.Info("托盘图标：已用 " + KindLabel() + " 绘制（" + size.ToString(CultureInfo.InvariantCulture)
                                     + "px，当前 " + text + "，档位 " + level.ToString(CultureInfo.InvariantCulture) + "）");
                             }
