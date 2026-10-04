@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.4.3.0")]
-[assembly: AssemblyFileVersion("0.4.3.0")]
+[assembly: AssemblyVersion("0.4.4.0")]
+[assembly: AssemblyFileVersion("0.4.4.0")]
 
 namespace OpenMIFS
 {
@@ -483,6 +483,10 @@ namespace OpenMIFS
     {
         public const string TaskName = "OpenMIFS";
 
+        /// <summary>开机自启必须带的参数：静默进托盘，不弹主界面。
+        /// 早期版本创建的任务没带这个参数，登录时会弹出窗口 —— NeedsRepair() 会检出并重建。</summary>
+        public const string TrayArgument = "--tray";
+
         public static bool IsEnabled()
         {
             string o;
@@ -490,16 +494,34 @@ namespace OpenMIFS
             return code == 0;
         }
 
+        /// <summary>读任务的命令行（用 /XML，元素名与系统语言无关）。</summary>
+        public static string TaskCommand()
+        {
+            string o;
+            int code = Proc.Run("schtasks.exe", "/Query /TN \"" + TaskName + "\" /XML", out o, 15000);
+            return code == 0 ? o : "";
+        }
+
+        /// <summary>任务存在但命令行不含 --tray（老版本创建的）→ 需要重建。</summary>
+        public static bool NeedsRepair()
+        {
+            if (!IsEnabled()) return false;
+            string xml = TaskCommand();
+            if (xml.Length == 0) return false;   // 读不到就不动它
+            return xml.IndexOf(TrayArgument, StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
         /// <summary>创建/删除开机自启任务。用计划任务而不是 Run 注册表项，
         /// 因为本程序声明了 requireAdministrator —— 注册表 Run 会在每次登录时弹 UAC，
-        /// 而 /RL HIGHEST 的计划任务登录时静默以最高权限启动。</summary>
+        /// 而 /RL HIGHEST 的计划任务登录时静默以最高权限启动。
+        /// 命令行里带 --tray：登录启动时只进托盘，不弹窗口。</summary>
         public static bool Set(bool enable)
         {
             string exe = Application.ExecutablePath;
             string o;
             if (enable)
             {
-                string args = "/Create /TN \"" + TaskName + "\" /TR \"\\\"" + exe + "\\\"\""
+                string args = "/Create /TN \"" + TaskName + "\" /TR \"\\\"" + exe + "\\\" " + TrayArgument + "\""
                             + " /SC ONLOGON /RL HIGHEST /F /DELAY 0000:10";
                 int code = Proc.Run("schtasks.exe", args, out o, 30000);
                 Log.Info("开机自启：创建计划任务（exit=" + code.ToString(CultureInfo.InvariantCulture) + "）" + o.Replace("\r\n", " / "));
@@ -512,6 +534,19 @@ namespace OpenMIFS
                 Log.Info("开机自启：删除计划任务（exit=" + code.ToString(CultureInfo.InvariantCulture) + "）" + o.Replace("\r\n", " / "));
                 return !IsEnabled();
             }
+        }
+
+        /// <summary>老任务（不带 --tray）自动重建，避免登录时弹窗。启动时调用，幂等。</summary>
+        public static void RepairIfNeeded()
+        {
+            try
+            {
+                if (!NeedsRepair()) return;
+                Log.Warn("开机自启：现有计划任务不带 " + TrayArgument + "（老版本创建，登录会弹窗）→ 自动重建");
+                Set(true);
+                Log.Info("开机自启：重建完成，新命令行含 " + TrayArgument);
+            }
+            catch (Exception ex) { Log.Ex("修复开机自启任务失败", ex); }
         }
     }
 
@@ -1296,7 +1331,7 @@ namespace OpenMIFS
             }
         }
 
-        private void HideToTray()
+        internal void HideToTray()
         {
             Hide();
             ShowInTaskbar = false;
@@ -1520,7 +1555,7 @@ namespace OpenMIFS
             // 启动与 OSD
             GroupBox gOsd = NewGroup("启动与 OSD 屏幕提示", 354, 152);
 
-            _chkStartup.Text = "开机自启（计划任务 · 免 UAC）";
+            _chkStartup.Text = "开机自启（计划任务 · 免 UAC · 静默进托盘）";
             _chkStartup.Location = new Point(14, 22);
             _chkStartup.Size = new Size(232, 22);
             _chkStartup.Font = new Font("Microsoft YaHei UI", 9F);
@@ -2209,7 +2244,7 @@ namespace OpenMIFS
                 bool prev = _suppress;
                 _suppress = true;
                 _chkStartup.Checked = on;
-                _chkStartup.Text = on ? "开机自启（已启用）" : "开机自启（计划任务 · 免 UAC）";
+                _chkStartup.Text = on ? "开机自启（已启用 · 静默进托盘）" : "开机自启（计划任务 · 免 UAC · 静默进托盘）";
                 _suppress = prev;
             }
             catch (Exception ex) { Log.Ex("查询开机自启状态失败", ex); }
@@ -2470,7 +2505,10 @@ namespace OpenMIFS
         private bool _suppress;
         private bool _exiting;
 
-        public TrayContext()
+        public TrayContext() : this(false) { }
+
+        /// <summary>startHidden=true 时只驻留托盘，不弹主界面（开机自启走这条路）。</summary>
+        public TrayContext(bool startHidden)
         {
             _form = new MainForm();
             _form.StateChanged += delegate { RefreshTray(); };
@@ -2565,7 +2603,23 @@ namespace OpenMIFS
                 Log.Error("启动时未检测到 MIFS 接口：" + Mifs.LastError);
             }
 
-            _form.Show();
+            if (startHidden)
+            {
+                // 必须让控件创建句柄（否则传感器那边的 BeginInvoke 会抛异常），
+                // 所以先以"最小化 + 不显示在任务栏 + 完全透明"的方式 Show 一次，再收进托盘。
+                _form.WindowState = FormWindowState.Minimized;
+                _form.ShowInTaskbar = false;
+                _form.Opacity = 0;
+                _form.Show();
+                _form.HideToTray();
+                _form.Opacity = 1;
+                _form.WindowState = FormWindowState.Normal;
+                Log.Info("以 --tray 启动：只驻留托盘，不显示主界面");
+            }
+            else
+            {
+                _form.Show();
+            }
             RefreshTray();
             Log.Info("托盘已就绪，主窗口已显示");
         }
@@ -2700,11 +2754,13 @@ namespace OpenMIFS
         {
             bool diagnose = false;
             bool sensors = false;
+            bool tray = false;
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
                 if (a == "--diagnose" || a == "-d" || a == "/diagnose") diagnose = true;
                 if (a == "--sensors" || a == "-s" || a == "/sensors") sensors = true;
+                if (a == "--tray" || a == "-t" || a == "/tray" || a == "--silent" || a == "--minimized") tray = true;
             }
 
             // 无界面模式：探测传感器数据源，写进 %LOCALAPPDATA%\OpenMIFS\sensors-probe.txt 后退出
@@ -2745,6 +2801,12 @@ namespace OpenMIFS
             {
                 if (!createdNew)
                 {
+                    if (tray)
+                    {
+                        // 开机自启与手动启动撞车时不要弹框打扰
+                        Log.Info("检测到已有实例在运行（--tray 启动），静默退出");
+                        return;
+                    }
                     Log.Info("检测到已有实例在运行，本次启动退出");
                     MessageBox.Show("OpenMIFS 已在运行。\r\n请在任务栏右下角通知区域找到它的图标。",
                         "OpenMIFS", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -2759,8 +2821,10 @@ namespace OpenMIFS
 
                 Caps.Load();
                 Log.Info("MIFS 接口    : " + (Mifs.Available ? "可用" : "不可用 - " + Mifs.LastError));
+                Log.Info("启动方式     : " + (tray ? "--tray（只驻留托盘）" : "常规（显示主界面）"));
+                if (MifsApp.IsElevated) Startup.RepairIfNeeded();   // 老任务不带 --tray 会自动重建
 
-                try { Application.Run(new TrayContext()); }
+                try { Application.Run(new TrayContext(tray)); }
                 catch (Exception ex) { Log.Ex("主循环异常退出", ex); throw; }
                 finally { Log.Info("================ OpenMIFS 退出 ================"); }
             }

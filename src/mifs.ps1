@@ -33,7 +33,7 @@
     .\mifs.ps1 osd dpi-on          写入 DPI 兼容标记 ~ HIGHDPIAWARE（可撤销）
     .\mifs.ps1 osd dpi-off         撤销 DPI 兼容标记
     .\mifs.ps1 startup status      开机自启（计划任务 OpenMIFS）状态
-    .\mifs.ps1 startup on|off      开关开机自启（计划任务 /RL HIGHEST，登录时不弹 UAC）
+    .\mifs.ps1 startup on|off      开关开机自启（计划任务 /RL HIGHEST + --tray，登录时静默进托盘、不弹窗）
     .\mifs.ps1 log                 打印日志路径并显示最后 20 行
     .\mifs.ps1 fan test            风扇满速实测：按转速判定（会先开再关，全程可逆）
 
@@ -437,9 +437,17 @@ function Invoke-OsdRestart {
 }
 
 # ──────────────────────────────── 开机自启（计划任务）
+# 开机自启必须带 --tray：登录时只驻留托盘，不弹主界面。
+# 老版本创建的任务没有这个参数（登录会弹窗），NeedsRepair 为真时提示重建。
 function Get-StartupTask {
     $r = Invoke-NativeQuiet -Exe 'schtasks.exe' -Arguments @('/Query', '/TN', 'OpenMIFS')
-    [pscustomobject]@{ Enabled = ($r.ExitCode -eq 0); Output = $r.Output }
+    $enabled = ($r.ExitCode -eq 0)
+    $hasTray = $false
+    if ($enabled) {
+        $x = Invoke-NativeQuiet -Exe 'schtasks.exe' -Arguments @('/Query', '/TN', 'OpenMIFS', '/XML')
+        $hasTray = ($x.ExitCode -eq 0 -and $x.Output -match '--tray')
+    }
+    [pscustomobject]@{ Enabled = $enabled; HasTray = $hasTray; NeedsRepair = ($enabled -and -not $hasTray); Output = $r.Output }
 }
 
 function Set-StartupTask {
@@ -449,7 +457,8 @@ function Set-StartupTask {
         throw "找不到 $exePath —— 请先构建（build\build.ps1），或用 exe 版界面里的开关"
     }
     if ($Enable) {
-        $r = Invoke-NativeQuiet -Exe 'schtasks.exe' -Arguments @('/Create', '/TN', 'OpenMIFS', '/TR', "`"$exePath`"",
+        # /TR 里带 --tray：登录启动时静默进托盘（早期版本漏了这个参数，会弹主界面）
+        $r = Invoke-NativeQuiet -Exe 'schtasks.exe' -Arguments @('/Create', '/TN', 'OpenMIFS', '/TR', "`"$exePath`" --tray",
                 '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F', '/DELAY', '0000:10')
     }
     else {
@@ -458,7 +467,7 @@ function Set-StartupTask {
     $r.Output | ForEach-Object { Write-Host "  $_" }
     Write-MifsLog 'INFO ' ("开机自启 => {0}（exit={1}）{2}" -f $(if ($Enable) { 'on' } else { 'off' }), $r.ExitCode, $r.Output)
     if ($r.ExitCode -ne 0) { Write-Host ("设置失败（exit={0}）" -f $r.ExitCode) -ForegroundColor Red }
-    else { Write-Host ("开机自启已{0}（计划任务 OpenMIFS，/RL HIGHEST，登录时不弹 UAC）" -f $(if ($Enable) { '启用' } else { '关闭' })) -ForegroundColor Green }
+    else { Write-Host ("开机自启已{0}（计划任务 OpenMIFS，/RL HIGHEST，带 --tray 静默进托盘）" -f $(if ($Enable) { '启用' } else { '关闭' })) -ForegroundColor Green }
 }
 
 # ──────────────────────────────── 风扇实测（转速验证）
@@ -1295,7 +1304,7 @@ function Show-Status {
     catch { }
     try {
         $t = Get-StartupTask
-        Write-Host ("开机自启   : {0}" -f $(if ($t.Enabled) { '已启用（计划任务 OpenMIFS）' } else { '未启用' }))
+        Write-Host ("开机自启   : {0}" -f $(if ($t.NeedsRepair) { '已启用，但不带 --tray（登录会弹窗）→ 跑 .\mifs.cmd startup on 重建' } elseif ($t.Enabled) { '已启用（计划任务 OpenMIFS --tray，静默进托盘）' } else { '未启用' }))
     }
     catch { }
     Write-Host ''
@@ -1379,7 +1388,7 @@ try {
         }
         'startup' {
             switch ($Value) {
-                'status' { $t = Get-StartupTask; Write-Host ("开机自启: {0}" -f $(if ($t.Enabled) { '已启用（计划任务 OpenMIFS）' } else { '未启用' })) -ForegroundColor $(if ($t.Enabled) { 'Green' } else { 'DarkGray' }) }
+                'status' { $t = Get-StartupTask; Write-Host ("开机自启: {0}" -f $(if ($t.NeedsRepair) { '已启用但缺 --tray（登录会弹窗），跑 startup on 重建' } elseif ($t.Enabled) { '已启用（--tray，静默进托盘）' } else { '未启用' })) -ForegroundColor $(if ($t.NeedsRepair) { 'Yellow' } elseif ($t.Enabled) { 'Green' } else { 'DarkGray' }) }
                 'on'     { Set-StartupTask -Enable $true }
                 'off'    { Set-StartupTask -Enable $false }
                 default  { throw 'startup 需要 status / on / off' }
