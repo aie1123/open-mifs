@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.5.1.0")]
-[assembly: AssemblyFileVersion("0.5.1.0")]
+[assembly: AssemblyVersion("0.5.2.0")]
+[assembly: AssemblyFileVersion("0.5.2.0")]
 
 namespace OpenMIFS
 {
@@ -1806,6 +1806,7 @@ namespace OpenMIFS
         private readonly Label _lblTrayIcon = new Label();
         private readonly ComboBox _cmbTrayIcon = new ComboBox();
         private bool _trayUiSync;
+        private bool _mifsTempPowerChecked;
         private readonly ToolTip _tips = new ToolTip();
 
         /// <summary>按需创建一行（灰色小标签 + 加粗数值）。</summary>
@@ -2583,13 +2584,22 @@ namespace OpenMIFS
                 sb.AppendLine("供电         : " + t);
             }
 
-            // ── MIFS 的 CPU 温度/功率（本机恒为 0 = 未实现）
-            // 面板上不再单列这两行（右侧传感器区已经有 CPU 温度/功耗），只把它们计入顶部"未实现"清单
-            int? ct = Mifs.GetByte(Mifs.FnCpuTemp);
-            if (!(ct.HasValue && ct.Value > 0)) missing.Add("MIFS CPU 温度");
-
-            int? cp = Mifs.GetByte(Mifs.FnCpuPower);
-            if (!(cp.HasValue && cp.Value > 0)) missing.Add("MIFS CPU 功率");
+            // ── MIFS 的 CPU 温度/功率（功能号 22/23，本机恒为 0）
+            // **故意不计入顶部"未实现"清单**：CPU 温度/功耗已由 AMD 通道（ADL PMLog）与 PDH 提供，
+            // 把"MIFS CPU 温度"列出来只会让人误读成"这台机器读不到 CPU 温度"。
+            // 只探测一次、写一条日志备查（面板上由传感器区负责显示）。
+            if (!_mifsTempPowerChecked)
+            {
+                _mifsTempPowerChecked = true;
+                int? ct = Mifs.GetByte(Mifs.FnCpuTemp);
+                int? cp = Mifs.GetByte(Mifs.FnCpuPower);
+                bool ctOk = ct.HasValue && ct.Value > 0;
+                bool cpOk = cp.HasValue && cp.Value > 0;
+                Log.Info("MIFS 功能号 22/23（CPU 温度/功率）："
+                    + (ct.HasValue ? ct.Value.ToString(CultureInfo.InvariantCulture) : "读取失败") + " / "
+                    + (cp.HasValue ? cp.Value.ToString(CultureInfo.InvariantCulture) : "读取失败")
+                    + (ctOk && cpOk ? " → 可用" : " → 该功能号在本机未实现；面板改用 AMD 通道（ADL PMLog）+ PDH"));
+            }
 
             // ── OSD
             RefreshOsdState(false);
@@ -2607,9 +2617,16 @@ namespace OpenMIFS
             if (anyOk)
             {
                 _lblHeader.ForeColor = ColOk;
-                _lblHeader.Text = "OpenMIFS v" + MifsApp.VersionText + " · 接口正常 · " + (MifsApp.IsElevated ? "已提权" : "未提权") + " · 托盘常驻"
-                                + (Log.Available ? " · 日志已开启" : " · 日志不可用（只读目录？）")
-                                + "\r\n本机未实现：" + (missing.Count == 0 ? "无，全部功能可用" : string.Join("、", missing.ToArray()));
+                string head = "OpenMIFS v" + MifsApp.VersionText + " · 接口正常 · " + (MifsApp.IsElevated ? "已提权" : "未提权") + " · 托盘常驻"
+                            + (Log.Available ? " · 日志已开启" : " · 日志不可用（只读目录？）");
+                // 没有任何缺失就只留一行（"无，全部功能可用" 属于噪音）
+                if (missing.Count > 0)
+                {
+                    string miss = string.Join("、", missing.ToArray());
+                    if (miss.Length > 56) miss = miss.Substring(0, 56) + "…";
+                    head += "\r\n本机不支持：" + miss + "（其余功能正常）";
+                }
+                _lblHeader.Text = head;
             }
             else
             {
