@@ -11,11 +11,13 @@
 OpenMIFS 直接调用这个接口 —— 不安装任何官方组件、不加载任何驱动、不需要第三方运行库。
 
 ```
-OpenMIFS.exe        ← 下载即用，单文件 109 KB，常驻任务栏通知区域
-OpenMIFS.exe --diagnose   ← 无界面采集 OSD 诊断证据（排障用）
-OpenMIFS.exe --sensors    ← 无界面传感器探测，逐项报告本机可用通道
-mifs-gui.cmd        ← 从源码直接跑图形界面
-mifs.cmd status     ← 从源码跑命令行版
+OpenMIFS.exe               ← 下载即用，单文件约 145 KB，常驻任务栏通知区域
+OpenMIFS.exe --tray        ← 只驻留托盘，不弹主界面（开机自启用的就是它）
+OpenMIFS.exe --diagnose    ← 无界面采集 OSD 诊断证据（排障用）
+OpenMIFS.exe --sensors     ← 无界面传感器探测，逐项报告本机可用通道
+OpenMIFS.exe --icon-preview← 把托盘图标各数值各 DPI 画成放大对照图（确认可读性）
+mifs-gui.cmd               ← 从源码直接跑图形界面
+mifs.cmd status            ← 从源码跑命令行版
 ```
 
 ---
@@ -144,6 +146,9 @@ exe 版本额外具备：
 4. **性能模式的值编码可能因机型而异。** 上游驱动标注 `0=均衡 1=性能 2=低功耗`，
    但无界 14 Pro 2023 实测是 `0=性能 1=均衡 2=低功耗`。
    映射写在 `src/mifs.ps1`、`src/mifs-gui.ps1`、`src/csharp/OpenMIFS.cs` 顶部，可自行修改。
+5. **MIFS 的 CPU 温度/功率（功能号 22/23）在本机恒为 0，面板不使用它们。**
+   面板上的 CPU 温度/功耗来自 **AMD 通道（ADL2 PMLog）与 PDH RAPL**，与 MIFS 无关。
+   因此这两个功能号**不会**出现在"本机不支持"提示里 —— 否则会被误读成"这台机器读不到 CPU 温度"。
 
 ---
 
@@ -277,13 +282,14 @@ exe **首页右侧直接显示**（窗口可拖动缩放，数据区跟着变大
 | 温度 | **CPU die 温度**、**核显温度**、SoC 温度、热区温度、降频原因 | **ADL2 PMLog（`atiadlxx.dll`，AMD 官方用户态通道 = Adrenalin 同源）** + PDH 热区 |
 | GPU | 利用率（按引擎）、专用显存占用 | WMI `Win32_PerfFormattedData_GPUPerformanceCounters_*` |
 | GPU | **功耗**、核显/显存频率 | ADL2 PMLog `ASIC_POWER` / `CLK_GFXCLK` / `CLK_MEMCLK` |
-| 内存 | 容量 / 类型 / 速率 / 占用 | WMI `Win32_PhysicalMemory` + `Win32_OperatingSystem` |
-| 存储 | 型号 / 介质 / 总线 / 健康 / **温度**（需管理员）/ 磨损 / 通电时长 | `MSFT_PhysicalDisk` + `MSFT_StorageReliabilityCounter` |
+| 内存 | 容量 / 类型 / **速率（MT/s）** / 占用 | WMI `Win32_PhysicalMemory` + `Win32_OperatingSystem`；速率显式标 **MT/s** 并在提示里给实际时钟换算 |
+| 存储 | 型号 / 介质 / 总线 / 健康 / **温度** / 磨损 / 通电时长 | 三级兜底：`MSFT_StorageReliabilityCounter` → `IOCTL_STORAGE_QUERY_PROPERTY`（属性 52/51）→ **NVMe 健康日志**（log page 0x02，经 StorPort 适配器）。均需管理员，而 exe 本身已提权 |
 | 风扇 | 双风扇转速 | MIFS `fn=13` |
 | 电池 | 电量 / 供电状态 / 健康度 | `Win32_Battery` + `root\wmi` 电池容量 |
 
-本机（无界 14 Pro 2023）实测：空闲 CPU 封装功耗 10.8 W、8 线程满载 35.8 W，
-热区温度 52.9 ℃ → 64.9 ℃ 随负载变化 —— 都是能标定的真值。
+本机（无界 14 Pro 2023）实测：空闲 CPU 封装功耗 10.8 W、8 线程满载 35.8 W；
+CPU die 温度 51~58 ℃、核显 52~56 ℃、SoC 54~57 ℃（8 线程负载下三者同向上升）；
+显存频率恒为 2800 MHz（= DDR5-5600 的一半）；磁盘温度 32~35 ℃；**传感器可用 16 项、未实现 0 项**。
 命令 `.\src\mifs.ps1 sensors probe` 会逐项告诉你这台机器哪些通道可用。
 
 **CPU die 温度与核显温度都能读到** —— 走 AMD 显卡驱动自带的用户态 DLL `atiadlxx.dll`
@@ -417,9 +423,15 @@ open-mifs/
 ├─ assets/icon.ico         ← 原创图标
 ├─ docs/
 │  ├─ PROTOCOL.md          ← 协议、功能号表、踩坑、被排除的方案
+│  ├─ SENSORS.md           ← 传感器来源、零驱动方案、标定与实测依据
 │  ├─ OSD.md               ← Fn 屏幕提示（OSD）故障诊断与修复
+│  ├─ FAN-CONTROL.md       ← 风扇调速可行性分析与实测结论
+│  ├─ TRAY-TOOLTIP.md      ← 托盘提示/图标自定义（白名单、预算、阈值、DPI 坑）
+│  ├─ ARCHITECTURE.md      ← 模块划分、数据流、线程模型、扩展点
 │  ├─ TESTED-MODELS.md     ← 机型实测矩阵
 │  └─ screenshots/         ← 界面截图
+├─ AGENTS.md               ← 给 AI 编码助手的项目约定（构建、验证、禁区）
+├─ tools/                  ← 诊断脚本（如 disk-temp-probe.ps1）
 └─ .github/                ← CI 与 issue 模板
 ```
 
@@ -499,6 +511,23 @@ ACPI WMI 方法必须在**实例**上调用，不能在类上调用。本工具�
 
 ---
 
+## 文档索引
+
+| 文档 | 内容 |
+| :--- | :--- |
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | MIFS 协议、功能号表、调用两个必踩的坑、被排除的路线 |
+| [docs/SENSORS.md](docs/SENSORS.md) | 传感器来源与零驱动方案（含 ADL2 PMLog 的调用方式与坑） |
+| [docs/OSD.md](docs/OSD.md) | Fn 屏幕提示看不显示的诊断链路与修复方法 |
+| [docs/FAN-CONTROL.md](docs/FAN-CONTROL.md) | 风扇调速可行性分析、三条路线、实测结论 |
+| [docs/TRAY-TOOLTIP.md](docs/TRAY-TOOLTIP.md) | 托盘提示与图标自定义（白名单、最坏宽度预算、变色阈值、DPI 坑） |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模块划分、数据流、线程模型、扩展点 |
+| [docs/TESTED-MODELS.md](docs/TESTED-MODELS.md) | 机型实测矩阵与实测数据 |
+| [AGENTS.md](AGENTS.md) | **给 AI 编码助手的项目约定**：构建、验证纪律、禁区、发布流程 |
+| [docs/REPO-METADATA.md](docs/REPO-METADATA.md) | 仓库 About 文案、Topics、发版核对清单 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
+
+---
+
 ## 贡献
 
 最有价值的贡献是**你的机型的实测数据**。请跑：
@@ -510,6 +539,10 @@ ACPI WMI 方法必须在**实例**上调用，不能在类上调用。本工具�
 
 把完整输出贴进 issue（有专门的「机型实测数据」模板），并附上机型全称、CPU、BIOS 版本。
 我会汇总进 [docs/TESTED-MODELS.md](docs/TESTED-MODELS.md)。
+
+想改代码（人或 AI 助手）**先读 [AGENTS.md](AGENTS.md)**：里面有构建方式、必须遵守的验证纪律
+（例如"判断写入是否生效，必须找一个独立于寄存器镜像的物理量"）、以及三条硬约束
+（不加载内核驱动、不造假数据、不声称未验证的结论）。
 
 机型信息获取方式：
 
