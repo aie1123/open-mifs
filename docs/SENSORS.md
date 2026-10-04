@@ -70,7 +70,7 @@ ADL2_New_QueryPMLogData_Get(ctx, adapterIndex, &data);     // 每次读取
 | # | 枚举名 | 含义 | 本机实测 |
 | :---: | :--- | :--- | :--- |
 | 1 | `CLK_GFXCLK` | 核显频率 MHz | 800（空闲） |
-| 2 | `CLK_MEMCLK` | 显存频率 MHz | 2800（= DDR5-5600 的一半） |
+| 2 | `CLK_MEMCLK` | 显存频率 MHz | 2800（= DDR5-5600 MT/s 的一半） |
 | 16 | `SOC_VOLTAGE` | SoC 电压 mV | 965 |
 | 19 | `INFO_ACTIVITY_GFX` | 核显活动 % | 16~35 |
 | 23 | `ASIC_POWER` | APU 功耗 W | 20~29 |
@@ -214,7 +214,7 @@ ADL2_New_QueryPMLogData_Get(ctx, adapterIndex, &data);     // 每次读取
 VDDCR / SoC: 13.78 W / 6.53 W      插槽功耗 : 25.00 W
 热区       : 62.9 ℃（高精度 63.1 ℃，降频原因 0）
 GPU 利用率 : Video Codec 14.0 %（合计 21.0 %）    显存 : 360 MB
-内存       : 32.0 GB  2×16 GB DDR5-5600   占用 15.9 / 31.2 GB（51.0 %）
+内存       : 32.0 GB  2×16 GB DDR5-5600 MT/s   占用 15.9 / 31.2 GB（51.0 %）
 存储       : YMTC PC300-1TB-B（SSD）NVMe 健康 954 GB（温度需管理员）
 电池       : 92 %  外接电源  健康 100.0 %（65000/65000 mWh）
 ```

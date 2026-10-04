@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.5.0.0")]
-[assembly: AssemblyFileVersion("0.5.0.0")]
+[assembly: AssemblyVersion("0.5.1.0")]
+[assembly: AssemblyFileVersion("0.5.1.0")]
 
 namespace OpenMIFS
 {
@@ -1278,6 +1278,8 @@ namespace OpenMIFS
         private readonly Font _fontUi8 = new Font("Microsoft YaHei UI", 8F);
 
         public event EventHandler StateChanged;
+        /// <summary>图标显示项改变 → 托盘立刻重画（不必等 5 秒定时器）。</summary>
+        public event EventHandler TrayIconChanged;
 
         public MainForm()
         {
@@ -1298,6 +1300,7 @@ namespace OpenMIFS
             _timer.Start();
 
             TrayText.Load();
+            TrayIcon.Load();
             SyncTrayUi();
 
             _osdHintMode = Settings.Get("osd_hint", "auto");
@@ -1669,10 +1672,26 @@ namespace OpenMIFS
             _btnTrayDefault.Click += OnTrayDefaultClick;
             _gbTray.Controls.Add(_btnTrayDefault);
 
-            _lblTrayHint.Location = new Point(12, 142);
-            _lblTrayHint.Size = new Size(432, 18);
+            _lblTrayIcon.Location = new Point(12, 142);
+            _lblTrayIcon.Size = new Size(58, 18);
+            _lblTrayIcon.Font = _fontUi8;
+            _lblTrayIcon.Text = "图标显示";
+            _lblTrayIcon.TextAlign = ContentAlignment.MiddleLeft;
+            _gbTray.Controls.Add(_lblTrayIcon);
+
+            _cmbTrayIcon.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cmbTrayIcon.Location = new Point(72, 140);
+            _cmbTrayIcon.Size = new Size(132, 22);
+            _cmbTrayIcon.Font = _fontUi8;
+            for (int i = 0; i < TrayIcon.Kinds.Length; i++) _cmbTrayIcon.Items.Add(TrayIcon.KindLabels[i]);
+            _cmbTrayIcon.SelectedIndex = 0;
+            _cmbTrayIcon.SelectedIndexChanged += OnTrayIconKindChanged;
+            _gbTray.Controls.Add(_cmbTrayIcon);
+
+            _lblTrayHint.Location = new Point(212, 142);
+            _lblTrayHint.Size = new Size(234, 18);
             _lblTrayHint.Font = _fontUi8;
-            _lblTrayHint.Text = "上限 62 字符（Win32 单行）：放不下的项不允许勾选，请改用右键菜单查看。";
+            _lblTrayHint.Text = "上限 62 字符；图标上最多画 3 个字符";
             _gbTray.Controls.Add(_lblTrayHint);
             // ── 右列：状态 + 传感器，直接摆在首页，键值行显示，随窗口缩放
             _pnlSensorBar.Dock = DockStyle.Bottom;
@@ -1784,6 +1803,8 @@ namespace OpenMIFS
         private readonly Label _lblTrayBudget = new Label();
         private readonly Label _lblTrayHint = new Label();
         private readonly Button _btnTrayDefault = new Button();
+        private readonly Label _lblTrayIcon = new Label();
+        private readonly ComboBox _cmbTrayIcon = new ComboBox();
         private bool _trayUiSync;
         private readonly ToolTip _tips = new ToolTip();
 
@@ -1890,6 +1911,8 @@ namespace OpenMIFS
             {
                 for (int i = 0; i < TrayText.All.Length; i++)
                     _lstTray.SetItemChecked(i, TrayText.IsSelected(TrayText.All[i].Id));
+                for (int i = 0; i < TrayIcon.Kinds.Length; i++)
+                    if (TrayIcon.Kinds[i] == TrayIcon.Kind) _cmbTrayIcon.SelectedIndex = i;
             }
             finally { _trayUiSync = false; }
             RefreshTrayPreview();
@@ -1924,8 +1947,18 @@ namespace OpenMIFS
                 e.NewValue = CheckState.Unchecked;
                 return;
             }
-            _lblTrayHint.Text = "上限 62 字符（Win32 单行）：放不下的项不允许勾选，请改用右键菜单查看。";
+            _lblTrayHint.Text = "上限 62 字符；图标上最多画 3 个字符";
             RefreshTrayPreview();
+        }
+
+        private void OnTrayIconKindChanged(object sender, EventArgs e)
+        {
+            if (_trayUiSync) return;
+            int i = _cmbTrayIcon.SelectedIndex;
+            if (i < 0 || i >= TrayIcon.Kinds.Length) return;
+            TrayIcon.Save(TrayIcon.Kinds[i]);
+            Log.Info("托盘图标：改为 " + TrayIcon.KindLabel() + "（" + TrayIcon.Kinds[i] + "）");
+            if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);   // 托盘立刻重画
         }
 
         private void OnTrayDefaultClick(object sender, EventArgs e)
@@ -2646,7 +2679,8 @@ namespace OpenMIFS
 
         // 值快照：主窗体刷新时写入，托盘只读（避免两边重复采集）
         private static readonly Dictionary<string, string> _snap = new Dictionary<string, string>();
-        public static DateTime SnapTime = DateTime.MinValue;
+        public static DateTime SnapTime = DateTime.MinValue;      // 任何快照更新（状态或传感器）
+        public static DateTime SensorTime = DateTime.MinValue;    // 仅传感器快照更新（隐藏态按需采集用它做节流）
 
         private static readonly List<string> _selected = new List<string> { "ver", "mode", "fan" };
 
@@ -2856,6 +2890,7 @@ namespace OpenMIFS
                 else Put("bat", null);
 
                 SnapTime = DateTime.Now;
+                SensorTime = DateTime.Now;
             }
             catch (Exception ex) { Log.Ex("托盘快照（传感器）失败", ex); }
         }
@@ -2888,6 +2923,202 @@ namespace OpenMIFS
         }
     }
 
+    // ───────────────────────────────────────────────── 托盘图标上画数值（动态图标）
+    /// <summary>把当前值画进托盘图标：整块填色 + 2~3 个字符。
+    /// 16×16 的物理极限就是 2~3 个字符，所以只提供短数值（温度/功耗/负载），
+    /// 风扇 RPM（4 位数）不适合，故不提供。
+    /// 注意：GDI 句柄必须释放 —— Icon.FromHandle 不接管所有权，
+    /// 旧 Icon 与本轮 Bitmap 都要 Dispose，否则每次刷新泄漏一个 GDI 对象。</summary>
+    internal static class TrayIcon
+    {
+        [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr h);
+        [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+        private const int SM_CXSMICON = 49;
+
+        /// <summary>可选数据源（id 与 TrayText 的项目 id 一致；none = 保持程序图标）。</summary>
+        public static readonly string[] Kinds = new string[] { "none", "cput", "cpup", "cpul" };
+        public static readonly string[] KindLabels = new string[] { "无（程序图标）", "CPU 温度", "CPU 功耗", "CPU 负载" };
+
+        private static string _kind = "cput";
+        private static string _lastKey = "";
+        private static bool _loggedFirst;
+        private static bool _loggedNoData;
+        private static Icon _ownIcon;          // 自己创建的图标，换新时释放
+
+        public static string Kind { get { return _kind; } }
+
+        public static void Load()
+        {
+            try
+            {
+                string s = Settings.Get("tray_icon", "cput").Trim().ToLowerInvariant();
+                for (int i = 0; i < Kinds.Length; i++) if (Kinds[i] == s) { _kind = s; return; }
+                Log.Warn("托盘图标：未知取值 " + s + " → 回落 cput");
+                _kind = "cput";
+            }
+            catch (Exception ex) { Log.Ex("读取托盘图标配置失败", ex); }
+        }
+
+        public static void Save(string kind)
+        {
+            _kind = kind;
+            try { Settings.Set("tray_icon", kind); } catch (Exception ex) { Log.Ex("保存托盘图标配置失败", ex); }
+        }
+
+        public static string KindLabel()
+        {
+            for (int i = 0; i < Kinds.Length; i++) if (Kinds[i] == _kind) return KindLabels[i];
+            return KindLabels[0];
+        }
+
+        /// <summary>取出用于画图标的数字文本（不含单位，2~3 字符）。取不到返回 null。</summary>
+        public static string Number(string kind, out int level)
+        {
+            level = 0;
+            string raw = TrayText.PreviewFor(kind);
+            if (string.IsNullOrEmpty(raw)) return null;
+
+            // cput: "CPU 58℃"；cpup: "CPU 24.7W"；cpul: "CPU 18%"
+            string num = raw;
+            int sp = num.LastIndexOf(' ');
+            if (sp >= 0) num = num.Substring(sp + 1);
+            num = num.Replace("℃", "").Replace("W", "").Replace("%", "").Replace("G", "");
+            double d;
+            if (!double.TryParse(num, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) return null;
+
+            if (kind == "cput")
+            {
+                if (d < 55) level = 1; else if (d < 70) level = 2; else if (d < 85) level = 3; else level = 4;
+            }
+            else if (kind == "cpup")
+            {
+                if (d < 15) level = 1; else if (d < 30) level = 2; else if (d < 45) level = 3; else level = 4;
+            }
+            else
+            {
+                if (d < 25) level = 1; else if (d < 50) level = 2; else if (d < 80) level = 3; else level = 4;
+            }
+            return ((int)Math.Round(d)).ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static Color LevelColor(int level)
+        {
+            switch (level)
+            {
+                case 1: return Color.FromArgb(38, 118, 66);     // 凉：绿
+                case 2: return Color.FromArgb(158, 118, 20);    // 温：琥珀
+                case 3: return Color.FromArgb(176, 74, 24);     // 热：橙
+                default: return Color.FromArgb(168, 36, 36);    // 烫：红
+            }
+        }
+
+        /// <summary>画一枚图标（size×size）。--icon-preview 与运行时共用，保证预览就是运行时那枚。</summary>
+        public static Bitmap Render(string text, int level, int size)
+        {
+            Bitmap bmp = new Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
+                g.Clear(Color.Transparent);
+
+                int r = Math.Max(2, size / 6);
+                using (System.Drawing.Drawing2D.GraphicsPath p = RoundedRect(new Rectangle(0, 0, size, size), r))
+                using (SolidBrush b = new SolidBrush(text == null ? Color.FromArgb(96, 96, 104) : LevelColor(level)))
+                    g.FillPath(b, p);
+
+                if (text != null)
+                {
+                    // 2 字符用大字号，3 字符自动缩一档
+                    float px = text.Length <= 2 ? size * 0.60f : size * 0.44f;
+                    using (Font f = new Font("Segoe UI", px, FontStyle.Bold, GraphicsUnit.Pixel))
+                    using (SolidBrush fg = new SolidBrush(Color.White))
+                    using (StringFormat sf = new StringFormat())
+                    {
+                        sf.Alignment = StringAlignment.Center;
+                        sf.LineAlignment = StringAlignment.Center;
+                        sf.FormatFlags = StringFormatFlags.NoWrap;
+                        g.DrawString(text, f, fg, new RectangleF(0, 0, size, size), sf);
+                    }
+                }
+            }
+            return bmp;
+        }
+
+        private static System.Drawing.Drawing2D.GraphicsPath RoundedRect(Rectangle b, int r)
+        {
+            System.Drawing.Drawing2D.GraphicsPath p = new System.Drawing.Drawing2D.GraphicsPath();
+            int d = r * 2;
+            p.AddArc(b.X, b.Y, d, d, 180, 90);
+            p.AddArc(b.Right - d, b.Y, d, d, 270, 90);
+            p.AddArc(b.Right - d, b.Bottom - d, d, d, 0, 90);
+            p.AddArc(b.X, b.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        /// <summary>托盘刷新时调用：值变了才重画（避免无谓的 GDI 抖动）。</summary>
+        public static void Update(NotifyIcon tray)
+        {
+            try
+            {
+                if (_kind == "none")
+                {
+                    if (_lastKey == "none") return;
+                    _lastKey = "none";
+                    if (_ownIcon != null) { _ownIcon.Dispose(); _ownIcon = null; }
+                    try { tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+                    return;
+                }
+
+                int level;
+                string text = Number(_kind, out level);
+                if (text == null)
+                {
+                    // 没有值就保持程序图标（画个空白色块会像坏了）；数据回来后会自动换回数字图标
+                    if (!_loggedNoData) { _loggedNoData = true; Log.Info("托盘图标：暂时取不到 " + KindLabel() + " 的值，先保持程序图标"); }
+                    if (_lastKey != "app")
+                    {
+                        _lastKey = "app";
+                        if (_ownIcon != null) { _ownIcon.Dispose(); _ownIcon = null; }
+                        try { tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+                    }
+                    return;
+                }
+                _loggedNoData = false;
+                string key = _kind + "|" + text;
+                if (key == _lastKey) return;
+                _lastKey = key;
+
+                int size = GetSystemMetrics(SM_CXSMICON);
+                if (size < 16) size = 16;
+
+                using (Bitmap bmp = Render(text, level, size))
+                {
+                    IntPtr h = bmp.GetHicon();          // 必须 DestroyIcon，否则泄漏
+                    try
+                    {
+                        using (Icon tmp = Icon.FromHandle(h))
+                        {
+                            Icon clone = (Icon)tmp.Clone();
+                            if (_ownIcon != null) _ownIcon.Dispose();
+                            _ownIcon = clone;
+                            tray.Icon = clone;
+                            if (!_loggedFirst)
+                            {
+                                _loggedFirst = true;
+                                Log.Info("托盘图标：已用 " + KindLabel() + " 绘制（" + size.ToString(CultureInfo.InvariantCulture)
+                                    + "px，当前 " + text + "，档位 " + level.ToString(CultureInfo.InvariantCulture) + "）");
+                            }
+                        }
+                    }
+                    finally { DestroyIcon(h); }
+                }
+            }
+            catch (Exception ex) { Log.Ex("更新托盘图标失败", ex); }
+        }
+    }
+
     internal sealed class TrayContext : ApplicationContext
     {
         private readonly NotifyIcon _tray = new NotifyIcon();
@@ -2908,6 +3139,7 @@ namespace OpenMIFS
         {
             _form = new MainForm();
             _form.StateChanged += delegate { RefreshTray(); };
+            _form.TrayIconChanged += delegate { TrayIcon.Update(_tray); RefreshTray(); };
 
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.Font = new Font("Microsoft YaHei UI", 9F);
@@ -3119,11 +3351,14 @@ namespace OpenMIFS
                 _miStartup.Checked = Startup.IsEnabled();
 
                 // 窗口隐藏时主窗体不刷新传感器 → 勾了 CPU 项就按需后台采一轮快照
-                if (!_form.Visible && TrayText.NeedsSensors() && (DateTime.Now - TrayText.SnapTime).TotalSeconds > 8)
+                // 提示项或图标任一方需要传感器 → 隐藏时都要采快照
+                bool needSensors = TrayText.NeedsSensors() || TrayIcon.Kind != "none";
+                if (!_form.Visible && needSensors && (DateTime.Now - TrayText.SensorTime).TotalSeconds > 8)
                     _form.RequestHiddenSensorSnapshot();
                 string tip = TrayText.Build();
                 if (tip.Length == 0) tip = "OpenMIFS v" + MifsApp.VersionText;
                 _tray.Text = tip;
+                TrayIcon.Update(_tray);
             }
             catch (Exception ex) { Log.Ex("刷新托盘失败", ex); }
             _suppress = false;
@@ -3151,12 +3386,55 @@ namespace OpenMIFS
             bool diagnose = false;
             bool sensors = false;
             bool tray = false;
+            bool iconPreview = false;
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
                 if (a == "--diagnose" || a == "-d" || a == "/diagnose") diagnose = true;
                 if (a == "--sensors" || a == "-s" || a == "/sensors") sensors = true;
                 if (a == "--tray" || a == "-t" || a == "/tray" || a == "--silent" || a == "--minimized") tray = true;
+                if (a == "--icon-preview" || a == "--icon") iconPreview = true;
+            }
+
+            // 无界面模式：把托盘图标的各种取值画出来（放大 6 倍拼成一张图），用于确认 16×16 下是否可读
+            if (iconPreview)
+            {
+                Log.Info("================ OpenMIFS " + MifsApp.VersionText + " 托盘图标预览 ================");
+                try
+                {
+                    int[] sizes = new int[] { 16, 20, 24 };
+                    string[] samples = new string[] { "42", "58", "85", "100" };
+                    int cell = 24 * 6;
+                    int w = cell * 4 + 40, h = cell * sizes.Length + 40;
+                    using (Bitmap canvas = new Bitmap(w, h))
+                    {
+                        using (Graphics g = Graphics.FromImage(canvas))
+                        {
+                            g.Clear(Color.FromArgb(32, 32, 32));
+                            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                            for (int s = 0; s < sizes.Length; s++)
+                            {
+                                for (int v = 0; v < samples.Length; v++)
+                                {
+                                    int lv = v + 1;
+                                    using (Bitmap bmp = TrayIcon.Render(samples[v], lv, sizes[s]))
+                                    {
+                                        int x = 20 + v * cell + (cell - sizes[s] * 6) / 2;
+                                        int y = 20 + s * cell + (cell - sizes[s] * 6) / 2;
+                                        g.DrawImage(bmp, new Rectangle(x, y, sizes[s] * 6, sizes[s] * 6));
+                                    }
+                                }
+                            }
+                        }
+                        if (!Directory.Exists(Log.Folder)) Directory.CreateDirectory(Log.Folder);
+                        string file = Path.Combine(Log.Folder, "tray-icon-preview.png");
+                        canvas.Save(file, System.Drawing.Imaging.ImageFormat.Png);
+                        Log.Info("图标预览已写入 " + file + "（三行分别为 16/20/24 px，四列为 42/58/85/100）");
+                    }
+                }
+                catch (Exception ex) { Log.Ex("图标预览失败", ex); }
+                return;
             }
 
             // 无界面模式：探测传感器数据源，写进 %LOCALAPPDATA%\OpenMIFS\sensors-probe.txt 后退出

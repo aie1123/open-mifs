@@ -611,11 +611,17 @@ namespace OpenMIFS
                 if (modules > 0)
                 {
                     _memTypeCache = MemType(smbios);
+                    // 速率是"每秒百万次传输"= MT/s（DDR 的等效频率）。WMI 只给数字，
+                    // 不补单位会让人以为是 MHz —— 这里显式写 MT/s，并在提示里说明换算。
+                    string rate = speed > 0
+                        ? " " + speed.ToString(CultureInfo.InvariantCulture) + " MT/s（≈" 
+                          + (speed / 2).ToString(CultureInfo.InvariantCulture) + " MHz 实际时钟）"
+                        : "";
                     list.Add(new Reading("内存", "内存规格",
                         string.Format(CultureInfo.InvariantCulture, "{0:0.0} GB  {1}×{2:0} GB {3}{4}",
-                            totalBytes / 1073741824.0, modules, totalBytes / 1073741824.0 / modules, _memTypeCache,
-                            speed > 0 ? "-" + speed.ToString(CultureInfo.InvariantCulture) : ""),
-                        true, "WMI Win32_PhysicalMemory"));
+                            totalBytes / 1073741824.0, modules, totalBytes / 1073741824.0 / modules,
+                            _memTypeCache, speed > 0 ? "-" + speed.ToString(CultureInfo.InvariantCulture) + " MT/s" : ""),
+                        true, "WMI Win32_PhysicalMemory" + rate));
                 }
                 if (totalKb > 0)
                 {
