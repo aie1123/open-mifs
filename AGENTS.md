@@ -14,7 +14,7 @@
 
 | 形态 | 文件 | 说明 |
 | :--- | :--- | :--- |
-| 托盘 exe ⭐ | `src/csharp/OpenMIFS.cs` + `src/csharp/Sensors.cs` | 发布物就是这个 |
+| 托盘 exe ⭐ | `src/csharp/OpenMIFS.cs` + `src/csharp/Sensors.cs` + `src/csharp/Ui.cs` | 发布物就是这个 |
 | 图形脚本 | `src/mifs-gui.ps1` | PowerShell + WinForms |
 | 命令行 | `src/mifs.ps1` | `mifs.cmd` 启动 |
 
@@ -79,7 +79,9 @@
 5. `csc` 编译到临时目录，然后 `--sensors` / `--diagnose` / 直接启动截图
 6. **收尾必须删除临时目录与 `%LOCALAPPDATA%\OpenMIFS_<tag>`**
 
-截图套路：`GetWindowRect` + `CopyFromScreen`；先 `SetProcessDPIAware()`。
+截图套路：`DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS=9)` 取**可见**矩形 + `CopyFromScreen`；先 `SetProcessDPIAware()`。
+**不要用 `GetWindowRect`**：Win10/11 会多出约 8px 不可见边框，截出来的左/下边缘会带上"背后窗口"的内容（曾误判成 UI 文字溢出）。
+截不到就把窗口 `SetWindowPos(HWND_TOPMOST)` 顶到最前（`SetForegroundWindow` 常被前台锁定策略挡掉）。
 窗口可能开在虚拟显示器上 → 抓不到就用 `MoveWindow` 挪到固定坐标（提权窗口挪不动，受 UIPI 限制）。
 
 **回归模式**：`o.exe --toggle-test=3` 会"隐藏启动 → 置为最小化+已隐藏 → 反复切换可见性"，
@@ -120,7 +122,8 @@
 | 想改的东西 | 位置 |
 | :--- | :--- |
 | MIFS 调用、功能号、模式映射 | `OpenMIFS.cs` 的 `Mifs` / `ModeMap` |
-| 界面与键值行渲染 | `MainForm`（`KvRow` / `RenderKeyValues` / `SensorOrder`） |
+| 界面 token（颜色/字体/间距）与自绘控件 | `src/csharp/Ui.cs`（`Ui` / `FlatButton` / `RecessedPanel` / `SectionTitle` / `ReadoutRow` / `BigReadout`） |
+| 界面布局与读数渲染 | `MainForm`（`BuildUi` / `BuildPrefsUi` / `RefreshAll` / `RefreshSensors` / `ApplyBig` / `LevelOf`）—— 设计依据见 `docs/UI-DESIGN.md` |
 | 托盘菜单、托盘提示、托盘图标 | `TrayContext` / `TrayText` / `TrayIcon` |
 | 传感器读取 | `Sensors.cs`（`ReadAll` / `Render` / `AdlPmlog` / IOCTL 兜底） |
 | OSD 诊断与自带屏幕提示 | `OpenMIFS.cs` 的 `Osd` / `OsdDpi` / `OsdOverlay` |

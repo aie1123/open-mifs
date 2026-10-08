@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.5.6.0")]
-[assembly: AssemblyFileVersion("0.5.6.0")]
+[assembly: AssemblyVersion("0.6.0.0")]
+[assembly: AssemblyFileVersion("0.6.0.0")]
 
 namespace OpenMIFS
 {
@@ -1212,49 +1212,75 @@ namespace OpenMIFS
     // ──────────────────────────────────────────────────────────────── 主窗口
     internal sealed class MainForm : Form
     {
-        private static readonly Color ColOk   = Color.FromArgb(22, 128, 61);
-        private static readonly Color ColWarn = Color.FromArgb(185, 28, 28);
-        private static readonly Color ColDim  = Color.FromArgb(130, 130, 130);
+        // ── 顶部状态条（N4：版本只在标题栏出现；徽标之间不用 "·" 串接）
+        private readonly Label _lblBrand = new Label();
+        private readonly Label _lblBadgeMode = new Label();
+        private readonly Label _lblBadgeAc = new Label();
+        private readonly Label _lblBadgeOsd = new Label();
+        private readonly Label _lblClock = new Label();
+        private readonly FlatButton _btnRefreshNow = new FlatButton();
+        private readonly FlatButton _btnElevate = new FlatButton();
 
-        private readonly Label _lblHeader = new Label();
-        private readonly Button[] _btnMode = new Button[3];
-        private readonly Label _lblFan = new Label();
-        private readonly Button _btnBoost = new Button();
+        // ── 左列：控制（平面；回读贴在控件旁）
+        private readonly FlatButton[] _btnMode = new FlatButton[3];
+        private readonly Label _lblModeNote = new Label();
         private readonly CheckBox _chkFn = new CheckBox();
         private readonly CheckBox _chkTp = new CheckBox();
-        private readonly Button[] _btnKbd = new Button[4];
-        private GroupBox _gbKbd;
-        private readonly CheckBox _chkStartup = new CheckBox();
+        private readonly FlatButton[] _btnKbd = new FlatButton[4];
+        private readonly Label _lblKbdNote = new Label();
+        private readonly FlatButton _btnBoost = new FlatButton();
+        private readonly Label _lblBoostNote = new Label();
         private readonly ComboBox _cmbOsdHint = new ComboBox();
+        private readonly FlatButton _btnOsdRestart = new FlatButton();
+        private readonly FlatButton _btnOsdDiag = new FlatButton();
+        private readonly FlatButton _btnOsdDir = new FlatButton();
+        private readonly FlatButton _btnRecap = new FlatButton();
+        private readonly CheckBox _chkStartup = new CheckBox();
+        private readonly CheckBox _chkDpi = new CheckBox();
+        private readonly Label _lblDpi = new Label();
+
+        // ── 左列底部：偏好设置（折叠；N11）
+        private readonly FlatButton _btnPrefs = new FlatButton();
+        private readonly Panel _pnlPrefs = new Panel();
+        private readonly CheckedListBox _lstTray = new CheckedListBox();
+        private readonly Label _lblTrayPreview = new Label();
+        private readonly Label _lblTrayBudget = new Label();
+        private readonly Label _lblTrayHint = new Label();
+        private readonly FlatButton _btnTrayDefault = new FlatButton();
+        private readonly Label _lblTrayIcon = new Label();
+        private readonly ComboBox _cmbTrayIcon = new ComboBox();
+        private readonly Label _lblTrayTh = new Label();
+        private readonly NumericUpDown[] _numTrayTh = new NumericUpDown[] { new NumericUpDown(), new NumericUpDown(), new NumericUpDown() };
+        private readonly FlatButton _btnSensorProbe = new FlatButton();
+
+        // ── 右列：读数（凹陷面板；关键三项 + 三簇明细）
+        private RecessedPanel _pnlReadout;
+        private readonly BigReadout[] _big = new BigReadout[3];
+        private readonly List<ReadoutRow> _rows = new List<ReadoutRow>();
+        private readonly List<string> _rowNames = new List<string>();
+        private readonly Label _lblEnv = new Label();
+        private readonly Label _lblUnavail = new Label();
+
+        // ── 底部状态行
+        private readonly Label _lblSensorHint = new Label();
+        private readonly CheckBox _chkAuto = new CheckBox();
+        private readonly ComboBox _cmbInterval = new ComboBox();
+
+        // ── 定时器与运行态
         private readonly System.Windows.Forms.Timer _hintTimer = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer _osdWatch = new System.Windows.Forms.Timer();
+        private readonly ToolTip _tips = new ToolTip();
+        private OsdOverlay _overlay;
+
         private string _osdHintMode = "auto";
         private string _pendingHint;
         private bool _sensorBusy;
         private int _acTypeNow = -1;
         private int _fanRpmBefore = -1;
-        private readonly Label _lblOsd = new Label();
-        private readonly Button _btnOsdRestart = new Button();
-        private readonly Button _btnOsdDiag = new Button();
-        private readonly Button _btnOsdDir = new Button();
-        private readonly Button _btnRecap = new Button();
-        private readonly CheckBox _chkDpi = new CheckBox();
-        private readonly Label _lblDpi = new Label();
-        private readonly Panel _pnlStatusRows = new Panel();
-        private readonly Panel _pnlSensorRows = new Panel();
-        private GroupBox _gbStatus;
-        private readonly Panel _pnlSensorBar = new Panel();
-        private readonly Button _btnSensorProbe = new Button();
-        private readonly Label _lblResizeHint = new Label();
-        private GroupBox _gbSensors;
-        private readonly Label _lblSensorHint = new Label();
-        private DateTime _lastSensorRefresh = DateTime.MinValue;
-        private readonly CheckBox _chkAuto = new CheckBox();
-        private readonly ComboBox _cmbInterval = new ComboBox();
-        private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
-        private readonly System.Windows.Forms.Timer _osdWatch = new System.Windows.Forms.Timer();
-
-        private OsdOverlay _overlay;
-
+        private bool _mifsTempPowerChecked;
+        private bool _trayUiSync;
+        private bool _visibilityBusy;     // HideToTray/Restore 互斥，防止与 Resize 互递归
         private bool _suppress;
         private bool _fanBoostOn;
         private bool _fanBoostUsable;
@@ -1264,7 +1290,9 @@ namespace OpenMIFS
         private string _lastLoggedError = "";
 
         private DateTime _lastOsdCheck = DateTime.MinValue;
-        private string _osdStatus = "OSD：检测中…";
+        private string _osdStatus = "检测中…";
+        private bool _osdOk;
+        private DateTime _lastSensorRefresh = DateTime.MinValue;
 
         // 自带 OSD 的变化监视缓存（专门盯 Fn 键会改的那几个值）
         private int _wMode = -1;
@@ -1273,14 +1301,9 @@ namespace OpenMIFS
         private int _wKbd = -1;
         private bool _wPrimed;
 
-        private readonly Font _fontUi  = new Font("Microsoft YaHei UI", 9F);
-        private readonly Font _fontBold = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
-        private readonly Font _fontUi8 = new Font("Microsoft YaHei UI", 8F);
-
         public event EventHandler StateChanged;
         /// <summary>图标显示项改变 → 托盘立刻重画（不必等 5 秒定时器）。</summary>
         public event EventHandler TrayIconChanged;
-
         public MainForm()
         {
             Text = "OpenMIFS v" + MifsApp.VersionText + " — 同方 MIFS 控制台";
@@ -1289,7 +1312,7 @@ namespace OpenMIFS
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.Sizable;   // 可拖动缩放：右列数据区跟着窗口变大
             MaximizeBox = true;
-            Font = _fontUi;
+            Font = Ui.FontUi;
 
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
             catch { }
@@ -1525,484 +1548,466 @@ namespace OpenMIFS
         private const int RightColX = 480;
         private const int RightColGap = 12;
 
-        private GroupBox NewGroup(string text, int y, int h)
+        // ═══════════════════════════════════════════════════════════════
+        //  界面构建（v0.6.0「仪表台」三区布局，见 docs/UI-DESIGN.md §2）
+        //  左列控制（平面）/ 右列读数（凹陷）/ 顶部状态条 / 底部状态行
+        // ═══════════════════════════════════════════════════════════════
+        private SectionTitle AddTitle(string text, ref int y)
         {
-            GroupBox g = new GroupBox();
-            g.Text = text;
-            g.Location = new Point(LeftColX, y);
-            g.Size = new Size(LeftColW, h);
-            g.Font = _fontUi8;
-            g.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-            Controls.Add(g);
-            return g;
+            SectionTitle s = new SectionTitle();
+            s.Text = text;
+            s.Location = new Point(Ui.Pad, y);
+            s.Size = new Size(Ui.LeftW, 26);
+            Controls.Add(s);
+            y += 30;
+            return s;
+        }
+
+        private void AddNote(Label l, string text, ref int y)
+        {
+            l.AutoSize = false;
+            l.Text = text;
+            l.Font = Ui.FontSmall;
+            l.ForeColor = Ui.Label;
+            l.TextAlign = ContentAlignment.MiddleLeft;
+            l.Location = new Point(Ui.Pad, y);
+            l.Size = new Size(Ui.LeftW, 16);
+            Controls.Add(l);
+            y += 24;
+        }
+
+        private void AddButton(FlatButton b, string text, int x, int y, int w, EventHandler onClick, int tab)
+        {
+            b.Text = text;
+            b.Location = new Point(x, y);
+            b.Size = new Size(w, Ui.CtrlH);
+            b.TabIndex = tab;
+            b.AccessibleName = text;
+            if (onClick != null) b.Click += onClick;
+            Controls.Add(b);
+        }
+
+        private void AddCheck(CheckBox c, string text, int x, int y, int w, EventHandler onClick, int tab)
+        {
+            c.Text = text;
+            c.Location = new Point(x, y);
+            c.Size = new Size(w, 22);
+            c.Font = Ui.FontUi;
+            c.ForeColor = Ui.Ink;
+            c.FlatStyle = FlatStyle.System;
+            c.TabIndex = tab;
+            c.AccessibleName = text;
+            if (onClick != null) c.Click += onClick;
+            Controls.Add(c);
         }
 
         private void BuildUi()
         {
-            // 顶部状态条：两行文字，高度给足，避免第二行被下面的分组框压掉
-            _lblHeader.Location = new Point(14, 6);
-            _lblHeader.Size = new Size(ClientSize.Width - 26, 46);
-            _lblHeader.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            _lblHeader.Font = _fontUi8;
-            _lblHeader.Text = "正在检测接口…";
-            _lblHeader.AutoSize = false;
-            _lblHeader.TextAlign = ContentAlignment.TopLeft;
-            Controls.Add(_lblHeader);
+            BackColor = Ui.Surface;
+            Font = Ui.FontUi;
 
-            // 性能模式
-            GroupBox gMode = NewGroup("性能模式", 58, 68);
-            int x = 12;
+            // ── 顶部状态条
+            _lblBrand.AutoSize = false;
+            _lblBrand.Text = "OpenMIFS";
+            _lblBrand.Font = Ui.FontTitle;
+            _lblBrand.ForeColor = Ui.Ink;
+            _lblBrand.Location = new Point(14, 11);
+            _lblBrand.Size = new Size(92, 18);
+            Controls.Add(_lblBrand);
+
+            Label[] badges = new Label[] { _lblBadgeMode, _lblBadgeAc, _lblBadgeOsd };
+            int[] badgeW = new int[] { 70, 104, 150 };
+            int bx = 96;
+            for (int i = 0; i < badges.Length; i++)
+            {
+                badges[i].AutoSize = false;
+                badges[i].Font = Ui.FontUi;
+                badges[i].ForeColor = Ui.Ink;
+                badges[i].TextAlign = ContentAlignment.MiddleLeft;
+                badges[i].Location = new Point(bx, 11);
+                badges[i].Size = new Size(badgeW[i], 18);
+                Controls.Add(badges[i]);
+                bx += badgeW[i] + 12;
+            }
+
+            _lblClock.AutoSize = false;
+            _lblClock.Font = Ui.FontSmall;
+            _lblClock.ForeColor = Ui.Label;
+            _lblClock.TextAlign = ContentAlignment.MiddleRight;
+            _lblClock.Location = new Point(ClientSize.Width - 348, 12);
+            _lblClock.Size = new Size(80, 18);
+            _lblClock.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            Controls.Add(_lblClock);
+
+            _btnRefreshNow.Text = "立即刷新";
+            _btnRefreshNow.Size = new Size(94, 26);
+            _btnRefreshNow.Location = new Point(ClientSize.Width - 106, 7);
+            _btnRefreshNow.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnRefreshNow.TabIndex = 1;
+            _btnRefreshNow.AccessibleName = "立即刷新";
+            _btnRefreshNow.Click += delegate { Log.Info("手动刷新"); RefreshAll(); };
+            Controls.Add(_btnRefreshNow);
+
+            _btnElevate.Text = "以管理员重启";
+            _btnElevate.Size = new Size(112, 26);
+            _btnElevate.Location = new Point(ClientSize.Width - 226, 7);
+            _btnElevate.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnElevate.TabIndex = 2;
+            _btnElevate.AccessibleName = "以管理员身份重启";
+            _btnElevate.Visible = false;
+            _btnElevate.Click += OnElevateClick;
+            Controls.Add(_btnElevate);
+
+            Panel barLine = Ui.Hairline_(0, Ui.StatusBarH - 1, ClientSize.Width, this);
+            barLine.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            // ── 左列：控制
+            int y = 52;
+            AddTitle("性能模式", ref y);
             for (int i = 0; i < ModeMap.Order.Length; i++)
             {
-                Button b = new Button();
-                b.Text = ModeMap.Order[i];
-                b.Location = new Point(x, 24);
-                b.Size = new Size(140, 30);
+                FlatButton b = new FlatButton();
+                AddButton(b, ModeMap.Order[i], Ui.Pad + i * 152, y, 144, OnModeClick, 10 + i);
                 b.Tag = ModeMap.Order[i];
-                b.Font = new Font("Microsoft YaHei UI", 9F);
-                b.Click += OnModeClick;
-                gMode.Controls.Add(b);
                 _btnMode[i] = b;
-                x += 148;
             }
+            y += Ui.CtrlH + 4;
+            AddNote(_lblModeNote, "检测中…", ref y);
 
-            // 风扇
-            GroupBox gFan = NewGroup("风扇", 132, 84);
-            _lblFan.Location = new Point(12, 22);
-            _lblFan.Size = new Size(432, 20);
-            _lblFan.Font = _fontUi8;
-            _lblFan.Text = "读取中…";
-            _lblFan.AutoSize = false;
-            gFan.Controls.Add(_lblFan);
+            AddTitle("硬件开关", ref y);
+            AddCheck(_chkFn, "Fn 锁", Ui.Pad, y + 2, 150, OnFnLockClick, 20);
+            AddCheck(_chkTp, "触控板锁定", 200, y + 2, 200, OnTpLockClick, 21);
+            y += 30;
 
-            _btnBoost.Location = new Point(12, 46);
-            _btnBoost.Size = new Size(200, 28);
-            _btnBoost.Font = new Font("Microsoft YaHei UI", 9F);
-            _btnBoost.Text = "风扇满速：关";
-            _btnBoost.Click += OnFanBoostClick;
-            gFan.Controls.Add(_btnBoost);
-
-            // 硬件开关
-            GroupBox gSw = NewGroup("硬件开关", 222, 60);
-            _chkFn.Text = "Fn 锁";
-            _chkFn.Location = new Point(14, 24);
-            _chkFn.Size = new Size(150, 22);
-            _chkFn.Font = new Font("Microsoft YaHei UI", 9F);
-            _chkFn.Click += OnFnLockClick;
-            gSw.Controls.Add(_chkFn);
-
-            _chkTp.Text = "触控板锁定";
-            _chkTp.Location = new Point(200, 24);
-            _chkTp.Size = new Size(190, 22);
-            _chkTp.Font = new Font("Microsoft YaHei UI", 9F);
-            _chkTp.Click += OnTpLockClick;
-            gSw.Controls.Add(_chkTp);
-
-            // 键盘背光
-            _gbKbd = NewGroup("键盘背光亮度", 288, 60);
-            GroupBox gKbd = _gbKbd;
-            x = 12;
+            AddTitle("键盘背光", ref y);
             for (int i = 0; i < 4; i++)
             {
-                Button b = new Button();
-                b.Text = i.ToString(CultureInfo.InvariantCulture);
-                b.Location = new Point(x, 24);
-                b.Size = new Size(62, 28);
+                FlatButton b = new FlatButton();
+                AddButton(b, i.ToString(CultureInfo.InvariantCulture), Ui.Pad + i * 76, y, 62, OnKbdClick, 22 + i);
                 b.Tag = i;
-                b.Font = new Font("Microsoft YaHei UI", 9F);
-                b.Click += OnKbdClick;
-                gKbd.Controls.Add(b);
                 _btnKbd[i] = b;
-                x += 76;
             }
+            y += Ui.CtrlH + 4;
+            AddNote(_lblKbdNote, "", ref y);
 
-            // 启动与 OSD
-            GroupBox gOsd = NewGroup("启动与 OSD 屏幕提示", 354, 152);
+            AddTitle("风扇", ref y);
+            AddButton(_btnBoost, "风扇满速", Ui.Pad, y, 240, OnFanBoostClick, 30);
+            y += Ui.CtrlH + 4;
+            AddNote(_lblBoostNote, "", ref y);
 
-            _chkStartup.Text = "开机自启（计划任务 · 免 UAC · 静默进托盘）";
-            _chkStartup.Location = new Point(14, 22);
-            _chkStartup.Size = new Size(232, 22);
-            _chkStartup.Font = new Font("Microsoft YaHei UI", 9F);
-            _chkStartup.Click += OnStartupClick;
-            gOsd.Controls.Add(_chkStartup);
-
+            AddTitle("OSD 与启动", ref y);
             Label lblHintMode = new Label();
-            lblHintMode.Text = "屏幕提示";
-            lblHintMode.Location = new Point(248, 25);
-            lblHintMode.Size = new Size(60, 18);
-            lblHintMode.Font = _fontUi8;
             lblHintMode.AutoSize = false;
-            gOsd.Controls.Add(lblHintMode);
+            lblHintMode.Text = "屏幕提示";
+            lblHintMode.Font = Ui.FontSmall;
+            lblHintMode.ForeColor = Ui.Label;
+            lblHintMode.TextAlign = ContentAlignment.MiddleLeft;
+            lblHintMode.Location = new Point(Ui.Pad, y + 3);
+            lblHintMode.Size = new Size(76, 18);
+            Controls.Add(lblHintMode);
 
-            _cmbOsdHint.Location = new Point(308, 22);
-            _cmbOsdHint.Size = new Size(136, 22);
+            _cmbOsdHint.Location = new Point(Ui.Pad + 78, y);
+            _cmbOsdHint.Size = new Size(140, 22);
             _cmbOsdHint.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cmbOsdHint.Font = _fontUi8;
+            _cmbOsdHint.Font = Ui.FontUi;
+            _cmbOsdHint.TabIndex = 40;
+            _cmbOsdHint.AccessibleName = "自带屏幕提示模式";
             _cmbOsdHint.Items.AddRange(new object[] { "自动（不重复）", "总是显示", "关闭" });
             _cmbOsdHint.SelectedIndex = 0;
             _cmbOsdHint.SelectedIndexChanged += OnOsdHintModeChanged;
-            gOsd.Controls.Add(_cmbOsdHint);
+            Controls.Add(_cmbOsdHint);
+            y += 30;
 
-            _lblOsd.Location = new Point(12, 48);
-            _lblOsd.Size = new Size(432, 20);
-            _lblOsd.Font = _fontUi8;
-            _lblOsd.Text = "OSD：检测中…";
-            _lblOsd.AutoSize = false;
-            gOsd.Controls.Add(_lblOsd);
+            AddButton(_btnOsdRestart, "重启 OSD", Ui.Pad, y, 104, OnOsdRestartClick, 41);
+            AddButton(_btnOsdDiag, "诊断 OSD", 124, y, 104, OnOsdDiagClick, 42);
+            AddButton(_btnOsdDir, "打开目录", 236, y, 104, OnOpenOsdDirClick, 43);
+            AddButton(_btnRecap, "重测功能", 348, y, 104, OnRecapClick, 44);
+            y += Ui.CtrlH + 4;
 
-            _btnOsdRestart.Text = "重启 OSD";
-            _btnOsdRestart.Location = new Point(12, 74);
-            _btnOsdRestart.Size = new Size(104, 28);
-            _btnOsdRestart.Font = new Font("Microsoft YaHei UI", 9F);
-            _btnOsdRestart.Click += OnOsdRestartClick;
-            gOsd.Controls.Add(_btnOsdRestart);
-
-            _btnOsdDiag.Text = "诊断 OSD";
-            _btnOsdDiag.Location = new Point(122, 74);
-            _btnOsdDiag.Size = new Size(104, 28);
-            _btnOsdDiag.Font = new Font("Microsoft YaHei UI", 9F);
-            _btnOsdDiag.Click += OnOsdDiagClick;
-            gOsd.Controls.Add(_btnOsdDiag);
-
-            _btnOsdDir.Text = "打开目录";
-            _btnOsdDir.Location = new Point(232, 74);
-            _btnOsdDir.Size = new Size(104, 28);
-            _btnOsdDir.Font = new Font("Microsoft YaHei UI", 9F);
-            _btnOsdDir.Click += OnOpenOsdDirClick;
-            gOsd.Controls.Add(_btnOsdDir);
-
-            _btnRecap.Text = "重测功能";
-            _btnRecap.Location = new Point(342, 74);
-            _btnRecap.Size = new Size(102, 28);
-            _btnRecap.Font = new Font("Microsoft YaHei UI", 9F);
-            _btnRecap.Click += OnRecapClick;
-            gOsd.Controls.Add(_btnRecap);
-
-            // DPI 兼容修复：OSD 界面进程是 DPI 不感知的，在 125%/150% 缩放下
-            // 分层窗口可能静默画不出来。写一条 AppCompatFlags 标记让它按系统 DPI 渲染。
-            _chkDpi.Text = "DPI 兼容修复（实验，可撤销）";
-            _chkDpi.Location = new Point(14, 110);
-            _chkDpi.Size = new Size(240, 22);
-            _chkDpi.Font = new Font("Microsoft YaHei UI", 9F);
-            _chkDpi.Click += OnDpiFixClick;
-            gOsd.Controls.Add(_chkDpi);
-
-            _lblDpi.Location = new Point(258, 110);
-            _lblDpi.Size = new Size(186, 22);
-            _lblDpi.Font = _fontUi8;
-            _lblDpi.Text = "";
+            AddCheck(_chkStartup, "开机自启（登录时静默进托盘）", Ui.Pad, y + 2, 300, OnStartupClick, 45);
+            y += 30;
+            AddCheck(_chkDpi, "DPI 兼容修复（实验，可撤销）", Ui.Pad, y + 2, 240, OnDpiFixClick, 46);
             _lblDpi.AutoSize = false;
-            gOsd.Controls.Add(_lblDpi);
+            _lblDpi.Font = Ui.FontSmall;
+            _lblDpi.ForeColor = Ui.Label;
+            _lblDpi.TextAlign = ContentAlignment.MiddleLeft;
+            _lblDpi.Location = new Point(258, y + 3);
+            _lblDpi.Size = new Size(190, 18);
+            Controls.Add(_lblDpi);
+            y += 34;
 
-            // ── 托盘悬停提示：白名单勾选 + 最坏情况预算（放不下的直接拒绝勾选）
-            _gbTray = NewGroup("托盘提示", 516, 252);
-            _lstTray.CheckOnClick = true;
-            _lstTray.Location = new Point(12, 20);
-            _lstTray.Size = new Size(196, 172);
-            _lstTray.Font = new Font("Microsoft YaHei UI", 9F);
-            _lstTray.IntegralHeight = false;
-            _lstTray.ItemCheck += OnTrayItemCheck;
-            for (int i = 0; i < TrayText.All.Length; i++)
+            // ── 左列底部：偏好设置（默认折叠）
+            _btnPrefs.Text = "\u25B8 偏好设置";
+            _btnPrefs.Location = new Point(Ui.Pad, y);
+            _btnPrefs.Size = new Size(Ui.LeftW, Ui.CtrlH);
+            _btnPrefs.TabIndex = 60;
+            _btnPrefs.AccessibleName = "展开或收起偏好设置";
+            _btnPrefs.Click += delegate { TogglePrefs(); };
+            Controls.Add(_btnPrefs);
+
+            _pnlPrefs.Location = new Point(Ui.Pad, y + Ui.CtrlH + 4);
+            _pnlPrefs.Size = new Size(Ui.LeftW, 250);
+            _pnlPrefs.BackColor = Ui.Surface;
+            _pnlPrefs.Visible = false;
+            Controls.Add(_pnlPrefs);
+            BuildPrefsUi();
+
+            // ── 右列：读数面板（凹陷方角）
+            int rx = Ui.LeftW + 24;
+            _pnlReadout = new RecessedPanel();
+            _pnlReadout.Location = new Point(rx, 52);
+            _pnlReadout.Size = new Size(ClientSize.Width - rx - 12, ClientSize.Height - 52 - 46);
+            _pnlReadout.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            Controls.Add(_pnlReadout);
+            _tips.SetToolTip(_pnlReadout, "只读读数区：窗口可拖动缩放，这里会跟着变大。");
+
+            int innerW = _pnlReadout.Width - Ui.Pad * 2 - 4;
+            int colW = innerW / 3;
+            _big[0] = new BigReadout(_pnlReadout, Ui.Pad, 18, colW);
+            _big[1] = new BigReadout(_pnlReadout, Ui.Pad + colW, 18, colW);
+            _big[2] = new BigReadout(_pnlReadout, Ui.Pad + colW * 2, 18, colW);
+
+            int ry = 74;
+            Ui.Hairline_(Ui.Pad, ry, innerW, _pnlReadout);
+            ry += 10;
+
+            string[] cluster = new string[] { "热与功耗", "频率与负载", "存储与电池" };
+            string[][] clusterRows = new string[][]
             {
-                TrayText.Item it = TrayText.All[i];
-                _lstTray.Items.Add(it.Label);
-            }
-            _gbTray.Controls.Add(_lstTray);
-            _tips.SetToolTip(_lstTray, "勾选要显示在托盘悬停提示里的项目（顺序固定）。\r\n"
-                + "悬停提示最多 62 字符：勾到上限后，再加项会被拒绝 —— 先取消一项再勾。");
-
-            _lblTrayPreview.Location = new Point(216, 20);
-            _lblTrayPreview.Size = new Size(228, 100);
-            _lblTrayPreview.Font = _fontUi8;
-            _lblTrayPreview.BackColor = Color.FromArgb(246, 246, 248);
-            _lblTrayPreview.BorderStyle = BorderStyle.FixedSingle;
-            _lblTrayPreview.TextAlign = ContentAlignment.TopLeft;
-            _gbTray.Controls.Add(_lblTrayPreview);
-
-            _lblTrayBudget.Location = new Point(216, 124);
-            _lblTrayBudget.Size = new Size(228, 16);
-            _lblTrayBudget.Font = _fontUi8;
-            _lblTrayBudget.TextAlign = ContentAlignment.MiddleLeft;
-            _gbTray.Controls.Add(_lblTrayBudget);
-
-            _btnTrayDefault.Text = "恢复默认";
-            _btnTrayDefault.Location = new Point(216, 144);
-            _btnTrayDefault.Size = new Size(104, 26);
-            _btnTrayDefault.Font = new Font("Microsoft YaHei UI", 9F);
-            _btnTrayDefault.Click += OnTrayDefaultClick;
-            _gbTray.Controls.Add(_btnTrayDefault);
-
-            // 图标显示 + 变色阈值同一行：阈值只显示"当前图标数据源"的那一格（选 CPU 温度就只有温度阈值）
-            _lblTrayIcon.AutoSize = false;
-            _lblTrayIcon.Location = new Point(12, 196);
-            _lblTrayIcon.Size = new Size(72, 18);
-            _lblTrayIcon.Font = _fontUi8;
-            _lblTrayIcon.Text = "图标显示";
-            _lblTrayIcon.TextAlign = ContentAlignment.MiddleLeft;
-            _gbTray.Controls.Add(_lblTrayIcon);
-
-            _cmbTrayIcon.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cmbTrayIcon.Location = new Point(88, 194);
-            _cmbTrayIcon.Size = new Size(132, 22);
-            _cmbTrayIcon.Font = _fontUi8;
-            for (int i = 0; i < TrayIcon.Kinds.Length; i++) _cmbTrayIcon.Items.Add(TrayIcon.KindLabels[i]);
-            _cmbTrayIcon.SelectedIndex = 0;
-            _cmbTrayIcon.SelectedIndexChanged += OnTrayIconKindChanged;
-            _gbTray.Controls.Add(_cmbTrayIcon);
-
-            _lblTrayTh.AutoSize = false;
-            _lblTrayTh.Location = new Point(222, 196);
-            _lblTrayTh.Size = new Size(68, 18);
-            _lblTrayTh.Font = _fontUi8;
-            _lblTrayTh.Text = "变色阈值";
-            _lblTrayTh.TextAlign = ContentAlignment.MiddleLeft;
-            _gbTray.Controls.Add(_lblTrayTh);
-
-            // 三个带上下箭头的数字框：低/中/高三档分界（只显示当前图标数据源那一套）
-            for (int i = 0; i < 3; i++)
-            {
-                _numTrayTh[i].Location = new Point(294 + i * 50, 194);
-                _numTrayTh[i].Size = new Size(46, 22);
-                _numTrayTh[i].Font = _fontUi8;
-                _numTrayTh[i].DecimalPlaces = 0;
-                _numTrayTh[i].TextAlign = HorizontalAlignment.Right;
-                _numTrayTh[i].ValueChanged += OnTrayThresholdValueChanged;
-                _gbTray.Controls.Add(_numTrayTh[i]);
-            }
-
-            // 数字框右键 → 恢复该指标的默认阈值
-            ContextMenuStrip thMenu = new ContextMenuStrip();
-            ToolStripMenuItem thReset = new ToolStripMenuItem("恢复默认阈值");
-            thReset.Click += delegate
-            {
-                TrayIcon.ResetThresholdFor(TrayIcon.Kind);
-                RefreshTrayThresholdRow();
-                if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);
-                Log.Info("托盘图标：恢复默认阈值 " + TrayIcon.Kind);
+                new string[] { "GPU 温度", "GPU 功耗" },
+                new string[] { "CPU 频率", "CPU 负载", "GPU 利用率", "GPU 频率", "GPU 显存" },
+                new string[] { "内存占用", "内存规格", "磁盘温度", "磁盘", "电池" }
             };
-            thMenu.Items.Add(thReset);
-            for (int i = 0; i < 3; i++) _numTrayTh[i].ContextMenuStrip = thMenu;
+            for (int c = 0; c < cluster.Length; c++)
+            {
+                if (c > 0) { Ui.Hairline_(Ui.Pad, ry, innerW, _pnlReadout); ry += 10; }
+                Label ct = new Label();
+                ct.AutoSize = false;
+                ct.Text = cluster[c];
+                ct.Font = Ui.FontSmall;
+                ct.ForeColor = Ui.Label;
+                ct.BackColor = Color.Transparent;
+                ct.TextAlign = ContentAlignment.MiddleLeft;
+                ct.Location = new Point(Ui.Pad, ry);
+                ct.Size = new Size(innerW, 16);
+                _pnlReadout.Controls.Add(ct);
+                ry += 18;
+                for (int r = 0; r < clusterRows[c].Length; r++)
+                {
+                    ReadoutRow row = new ReadoutRow(_pnlReadout, ry, clusterRows[c][r], innerW + 4);
+                    _rows.Add(row);
+                    _rowNames.Add(clusterRows[c][r]);
+                    ry += Ui.RowH;
+                }
+            }
 
-            _lblTrayHint.Location = new Point(12, 224);
-            _lblTrayHint.Size = new Size(432, 16);
-            _lblTrayHint.Font = _fontUi8;
-            _lblTrayHint.Text = "图标显示选「无」时不使用阈值。";
-            _gbTray.Controls.Add(_lblTrayHint);
-            // ── 右列：状态 + 传感器，直接摆在首页，键值行显示，随窗口缩放
-            _pnlSensorBar.Dock = DockStyle.Bottom;
-            _pnlSensorBar.Height = 34;
-            _btnSensorProbe.Text = "探测数据源";
-            _btnSensorProbe.Location = new Point(4, 3);
-            _btnSensorProbe.Size = new Size(110, 28);
-            _btnSensorProbe.Font = new Font("Microsoft YaHei UI", 9F);
-            _btnSensorProbe.Click += OnSensorProbeClick;
-            _pnlSensorBar.Controls.Add(_btnSensorProbe);
+            _lblEnv.AutoSize = false;
+            _lblEnv.Font = Ui.FontSmall;
+            _lblEnv.ForeColor = Ui.Label;
+            _lblEnv.BackColor = Color.Transparent;
+            _lblEnv.TextAlign = ContentAlignment.MiddleLeft;
+            _lblEnv.Location = new Point(Ui.Pad, ry + 6);
+            _lblEnv.Size = new Size(innerW, 18);
+            _lblEnv.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
+            _pnlReadout.Controls.Add(_lblEnv);
 
-            _lblSensorHint.Location = new Point(122, 9);
-            _lblSensorHint.Size = new Size(360, 18);
-            _lblSensorHint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            _lblSensorHint.Font = _fontUi8;
-            _lblSensorHint.Text = "正在读取…";
-            _lblSensorHint.AutoSize = false;
-            _pnlSensorBar.Controls.Add(_lblSensorHint);
+            _lblUnavail.AutoSize = false;
+            _lblUnavail.Font = Ui.FontSmall;
+            _lblUnavail.ForeColor = Ui.Muted;
+            _lblUnavail.BackColor = Color.Transparent;
+            _lblUnavail.TextAlign = ContentAlignment.MiddleLeft;
+            _lblUnavail.Location = new Point(Ui.Pad, ry + 28);
+            _lblUnavail.Size = new Size(innerW, 18);
+            _lblUnavail.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
+            _pnlReadout.Controls.Add(_lblUnavail);
 
-            int rightW = ClientSize.Width - RightColX - RightColGap;
-
-            _gbStatus = new GroupBox();
-            _gbStatus.Text = "状态";
-            _gbStatus.Font = _fontUi8;
-            _gbStatus.Location = new Point(RightColX, 58);
-            _gbStatus.Size = new Size(rightW, 242);
-            _gbStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            _pnlStatusRows.AutoScroll = true;
-            _pnlStatusRows.Location = new Point(8, 18);
-            _pnlStatusRows.Size = new Size(rightW - 16, 216);
-            _pnlStatusRows.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            _gbStatus.Controls.Add(_pnlStatusRows);
-            Controls.Add(_gbStatus);
-
-            _gbSensors = new GroupBox();
-            _gbSensors.Text = "传感器（只读 · 零驱动）";
-            _gbSensors.Font = _fontUi8;
-            _gbSensors.Location = new Point(RightColX, 308);
-            _gbSensors.Size = new Size(rightW, ClientSize.Height - 308 - 52);
-            _gbSensors.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            _pnlSensorRows.AutoScroll = true;
-            _pnlSensorRows.Location = new Point(8, 18);
-            _pnlSensorRows.Size = new Size(rightW - 16, _gbSensors.Height - 56);
-            _pnlSensorRows.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            _gbSensors.Controls.Add(_pnlSensorRows);
-            _gbSensors.Controls.Add(_pnlSensorBar);
-            Controls.Add(_gbSensors);
-
-            // 底部
+            // ── 底部状态行（自动刷新 + 读数状态；刷新动作已并入状态条，N12）
+            int fy = ClientSize.Height - 32;
             _chkAuto.Text = "自动刷新";
-            _chkAuto.Location = new Point(14, ClientSize.Height - 36);
+            _chkAuto.Location = new Point(14, fy);
             _chkAuto.Size = new Size(92, 22);
-            _chkAuto.Checked = true;
-            _chkAuto.Font = _fontUi8;
-            _chkAuto.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            _chkAuto.Font = Ui.FontUi;
+            _chkAuto.ForeColor = Ui.Ink;
+            _chkAuto.FlatStyle = FlatStyle.System;
+            _chkAuto.TabIndex = 70;
+            _chkAuto.AccessibleName = "自动刷新开关";
             Controls.Add(_chkAuto);
 
-            _cmbInterval.Location = new Point(110, ClientSize.Height - 37);
+            _cmbInterval.Location = new Point(110, fy - 1);
             _cmbInterval.Size = new Size(66, 22);
             _cmbInterval.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cmbInterval.Font = _fontUi8;
-            _cmbInterval.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            _cmbInterval.Font = Ui.FontUi;
+            _cmbInterval.TabIndex = 71;
+            _cmbInterval.AccessibleName = "自动刷新间隔";
             _cmbInterval.Items.AddRange(new object[] { "2 秒", "3 秒", "5 秒", "10 秒" });
             _cmbInterval.SelectedIndex = 1;
             _cmbInterval.SelectedIndexChanged += OnIntervalChanged;
             Controls.Add(_cmbInterval);
 
-            Button btnRefresh = new Button();
-            btnRefresh.Text = "刷新";
-            btnRefresh.Location = new Point(ClientSize.Width - 106, ClientSize.Height - 41);
-            btnRefresh.Size = new Size(94, 28);
-            btnRefresh.Font = new Font("Microsoft YaHei UI", 9F);
-            btnRefresh.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
-            btnRefresh.Click += delegate { Log.Info("手动刷新"); RefreshAll(); };
-            Controls.Add(btnRefresh);
-
-            _lblResizeHint.Location = new Point(188, ClientSize.Height - 33);
-            _lblResizeHint.Size = new Size(220, 18);
-            _lblResizeHint.Font = _fontUi8;
-            _lblResizeHint.ForeColor = ColDim;
-            _lblResizeHint.Text = "窗口可拖动缩放，右侧数据区会跟着变大";
-            _lblResizeHint.AutoSize = false;
-            _lblResizeHint.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
-            Controls.Add(_lblResizeHint);
+            _lblSensorHint.AutoSize = false;
+            _lblSensorHint.Font = Ui.FontSmall;
+            _lblSensorHint.ForeColor = Ui.Label;
+            _lblSensorHint.TextAlign = ContentAlignment.MiddleLeft;
+            _lblSensorHint.Location = new Point(188, fy + 1);
+            _lblSensorHint.Size = new Size(ClientSize.Width - 204, 18);
+            _lblSensorHint.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
+            Controls.Add(_lblSensorHint);
         }
 
-        // ────────────────────────────────────────────────────── 数据行渲染
-        private sealed class KvRow
+        /// <summary>偏好设置区（折叠内容）：托盘提示 + 图标阈值 + 数据源探测。</summary>
+        private void BuildPrefsUi()
         {
-            public Label Key;
-            public Label Val;
-        }
+            _lstTray.CheckOnClick = true;
+            _lstTray.Location = new Point(0, 0);
+            _lstTray.Size = new Size(196, 172);
+            _lstTray.Font = Ui.FontUi;
+            _lstTray.IntegralHeight = false;
+            _lstTray.TabIndex = 61;
+            _lstTray.AccessibleName = "托盘悬停提示包含的项目";
+            _lstTray.ItemCheck += OnTrayItemCheck;
+            for (int i = 0; i < TrayText.All.Length; i++) _lstTray.Items.Add(TrayText.All[i].Label);
+            _pnlPrefs.Controls.Add(_lstTray);
+            _tips.SetToolTip(_lstTray, "勾选要显示在托盘悬停提示里的项目（顺序固定）。\r\n"
+                + "悬停提示最多 62 字符：勾到上限后，再加项会被拒绝 —— 先取消一项再勾。");
 
-        private const int RowH = 22;
-        private static readonly string[] SensorOrder = new string[]
-        {
-            "CPU 温度", "CPU 功耗", "CPU 频率", "CPU 负载",
-            "GPU 温度", "GPU 功耗", "GPU 利用率", "GPU 频率", "GPU 显存",
-            "内存占用", "内存规格", "磁盘温度", "磁盘",
-            "风扇1", "风扇2", "风扇3", "电池"
-        };
-        private readonly List<string> _statusOrder = new List<string>();
-        private readonly Dictionary<string, KvRow> _statusRows = new Dictionary<string, KvRow>();
-        private readonly List<string> _sensorOrder = new List<string>();
-        private readonly Dictionary<string, KvRow> _sensorRows = new Dictionary<string, KvRow>();
-        private GroupBox _gbTray;
-        private readonly CheckedListBox _lstTray = new CheckedListBox();
-        private readonly Label _lblTrayPreview = new Label();
-        private readonly Label _lblTrayBudget = new Label();
-        private readonly Label _lblTrayHint = new Label();
-        private readonly Button _btnTrayDefault = new Button();
-        private readonly Label _lblTrayIcon = new Label();
-        private readonly ComboBox _cmbTrayIcon = new ComboBox();
-        private readonly Label _lblTrayTh = new Label();
-        private readonly NumericUpDown[] _numTrayTh = new NumericUpDown[] { new NumericUpDown(), new NumericUpDown(), new NumericUpDown() };
-        private bool _trayUiSync;
-        private bool _visibilityBusy;     // HideToTray/Restore 互斥，防止与 Resize 互递归
-        private bool _mifsTempPowerChecked;
-        private readonly ToolTip _tips = new ToolTip();
+            _lblTrayPreview.AutoSize = false;
+            _lblTrayPreview.Location = new Point(204, 0);
+            _lblTrayPreview.Size = new Size(228, 100);
+            _lblTrayPreview.Font = Ui.FontSmall;
+            _lblTrayPreview.BackColor = Ui.Recessed;
+            _lblTrayPreview.ForeColor = Ui.Ink;
+            _lblTrayPreview.BorderStyle = BorderStyle.FixedSingle;
+            _lblTrayPreview.TextAlign = ContentAlignment.TopLeft;
+            _pnlPrefs.Controls.Add(_lblTrayPreview);
 
-        /// <summary>按需创建一行（灰色小标签 + 加粗数值）。</summary>
-        private KvRow EnsureRow(Panel host, List<string> order, Dictionary<string, KvRow> map, string key)
-        {
-            KvRow row;
-            if (map.TryGetValue(key, out row)) return row;
-            int y = order.Count * RowH;
-            Label k = new Label();
-            k.Text = key;
-            k.Location = new Point(10, y + 2);
-            k.Size = new Size(92, 20);
-            k.Font = _fontUi;
-            k.ForeColor = Color.FromArgb(96, 96, 102);
-            k.TextAlign = ContentAlignment.MiddleLeft;
-            k.AutoSize = false;
-            Label v = new Label();
-            v.Text = "—";
-            v.Location = new Point(104, y);
-            v.Size = new Size(host.Width - 112, 24);
-            v.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
-            v.TextAlign = ContentAlignment.MiddleLeft;
-            v.AutoSize = false;
-            v.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            host.Controls.Add(k);
-            host.Controls.Add(v);
-            row = new KvRow();
-            row.Key = k;
-            row.Val = v;
-            map[key] = row;
-            order.Add(key);
-            host.Height = 6 + order.Count * RowH;
-            return row;
-        }
+            _lblTrayBudget.AutoSize = false;
+            _lblTrayBudget.Location = new Point(204, 104);
+            _lblTrayBudget.Size = new Size(228, 16);
+            _lblTrayBudget.Font = Ui.FontSmall;
+            _lblTrayBudget.ForeColor = Ui.Label;
+            _pnlPrefs.Controls.Add(_lblTrayBudget);
 
-        /// <summary>单独设置一行（不存在就创建）。</summary>
-        private void SetRow(Panel host, List<string> order, Dictionary<string, KvRow> map, string key, string value)
-        {
-            KvRow r = EnsureRow(host, order, map, key);
-            r.Key.Text = key;
-            r.Val.Text = value;
-            r.Val.ForeColor = Color.FromArgb(24, 24, 28);
-        }
+            _btnTrayDefault.Text = "恢复默认";
+            _btnTrayDefault.Location = new Point(204, 124);
+            _btnTrayDefault.Size = new Size(104, 26);
+            _btnTrayDefault.TabIndex = 62;
+            _btnTrayDefault.AccessibleName = "恢复默认提示项";
+            _btnTrayDefault.Click += OnTrayDefaultClick;
+            _pnlPrefs.Controls.Add(_btnTrayDefault);
 
-        /// <summary>把「名称 : 值」形式的多行文本渲染成一排排键值标签（不再用文本框）。
-        /// "└" 开头的说明行不进面板，挂到该行的鼠标提示上；"== xx ==" 分组标题只看不显示。</summary>
-        private void RenderKeyValues(Panel host, List<string> order, Dictionary<string, KvRow> map, string text)
-        {
-            string[] lines = text.Replace("\r\n", "\n").Split('\n');
-            Dictionary<string, bool> seen = new Dictionary<string, bool>();
-            string lastKey = "";
+            _lblTrayIcon.AutoSize = false;
+            _lblTrayIcon.Location = new Point(0, 182);
+            _lblTrayIcon.Size = new Size(72, 18);
+            _lblTrayIcon.Font = Ui.FontSmall;
+            _lblTrayIcon.ForeColor = Ui.Label;
+            _lblTrayIcon.Text = "图标显示";
+            _lblTrayIcon.TextAlign = ContentAlignment.MiddleLeft;
+            _pnlPrefs.Controls.Add(_lblTrayIcon);
 
-            for (int i = 0; i < lines.Length; i++)
+            _cmbTrayIcon.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cmbTrayIcon.Location = new Point(76, 180);
+            _cmbTrayIcon.Size = new Size(140, 22);
+            _cmbTrayIcon.Font = Ui.FontUi;
+            _cmbTrayIcon.TabIndex = 63;
+            _cmbTrayIcon.AccessibleName = "托盘图标显示内容";
+            for (int i = 0; i < TrayIcon.Kinds.Length; i++) _cmbTrayIcon.Items.Add(TrayIcon.KindLabels[i]);
+            _cmbTrayIcon.SelectedIndex = 0;
+            _cmbTrayIcon.SelectedIndexChanged += OnTrayIconKindChanged;
+            _pnlPrefs.Controls.Add(_cmbTrayIcon);
+
+            _lblTrayTh.AutoSize = false;
+            _lblTrayTh.Location = new Point(228, 182);
+            _lblTrayTh.Size = new Size(68, 18);
+            _lblTrayTh.Font = Ui.FontSmall;
+            _lblTrayTh.ForeColor = Ui.Label;
+            _lblTrayTh.Text = "变色阈值";
+            _lblTrayTh.TextAlign = ContentAlignment.MiddleLeft;
+            _pnlPrefs.Controls.Add(_lblTrayTh);
+
+            for (int i = 0; i < 3; i++)
             {
-                string raw = lines[i];
-                string t = raw.Trim();
-                if (t.Length == 0) continue;
-                if (t.StartsWith("==")) continue;                    // 分组标题
-                if (t.StartsWith("└"))                               // 数据源说明 → 挂到上一行的提示
-                {
-                    KvRow prev;
-                    if (lastKey.Length > 0 && map.TryGetValue(lastKey, out prev))
-                        _tips.SetToolTip(prev.Val, t.Substring(1).Trim());
-                    continue;
-                }
-                int c = raw.IndexOf(':');
-                if (c <= 0) continue;
-                string key = raw.Substring(0, c).Trim();
-                string val = raw.Substring(c + 1).Trim();
-                if (key.Length == 0) continue;
-                lastKey = key;
-
-                KvRow row = EnsureRow(host, order, map, key);
-                row.Key.Text = key;
-                row.Val.Text = val;
-                // 未实现/不支持的值用灰色，一眼能分辨
-                bool dim = val.StartsWith("未实现") || val.StartsWith("不支持") || val.StartsWith("需要管理员")
-                        || val == "—" || val == "未知";
-                row.Val.ForeColor = dim ? Color.FromArgb(140, 140, 145) : Color.FromArgb(24, 24, 28);
-                seen[key] = true;
+                _numTrayTh[i].Location = new Point(300 + i * 50, 180);
+                _numTrayTh[i].Size = new Size(46, 22);
+                _numTrayTh[i].Font = Ui.FontUi;
+                _numTrayTh[i].DecimalPlaces = 0;
+                _numTrayTh[i].TextAlign = HorizontalAlignment.Right;
+                _numTrayTh[i].TabIndex = 64 + i;
+                _numTrayTh[i].AccessibleName = "变色阈值第 " + (i + 1).ToString(CultureInfo.InvariantCulture) + " 档";
+                _numTrayTh[i].ValueChanged += OnTrayThresholdValueChanged;
+                _pnlPrefs.Controls.Add(_numTrayTh[i]);
             }
 
-            // 本轮没出现过的行显示为 —
-            for (int i = 0; i < order.Count; i++)
-            {
-                if (seen.ContainsKey(order[i])) continue;
-                KvRow r = map[order[i]];
-                r.Val.Text = "—";
-                r.Val.ForeColor = Color.FromArgb(140, 140, 145);
-            }
+            _lblTrayHint.AutoSize = false;
+            _lblTrayHint.Location = new Point(0, 212);
+            _lblTrayHint.Size = new Size(432, 16);
+            _lblTrayHint.Font = Ui.FontSmall;
+            _lblTrayHint.ForeColor = Ui.Label;
+            _pnlPrefs.Controls.Add(_lblTrayHint);
+
+            _btnSensorProbe.Text = "探测数据源";
+            _btnSensorProbe.Location = new Point(0, 232);
+            _btnSensorProbe.Size = new Size(104, 26);
+            _btnSensorProbe.TabIndex = 68;
+            _btnSensorProbe.AccessibleName = "探测传感器数据源";
+            _btnSensorProbe.Click += OnSensorProbeClick;
+            _pnlPrefs.Controls.Add(_btnSensorProbe);
         }
 
-        private void SetRows(Panel host, List<string> order, Dictionary<string, KvRow> map, string text)
+        private void TogglePrefs()
         {
-            RenderKeyValues(host, order, map, text);
+            _pnlPrefs.Visible = !_pnlPrefs.Visible;
+            _btnPrefs.Text = (_pnlPrefs.Visible ? "\u25BE 偏好设置" : "\u25B8 偏好设置");
+            _btnPrefs.Selected = _pnlPrefs.Visible;
+            Log.Info("偏好设置：" + (_pnlPrefs.Visible ? "展开" : "收起"));
         }
 
-        // ── 托盘提示设置
+        /// <summary>未提权时的一键提权重启（状态条右侧）。</summary>
+        private void OnElevateClick(object sender, EventArgs e)
+        {
+            try
+            {
+                Log.Info("用户请求以管理员身份重启");
+                ProcessStartInfo psi = new ProcessStartInfo(Application.ExecutablePath);
+                psi.UseShellExecute = true;
+                psi.Verb = "runas";
+                Process.Start(psi);
+                ForceClose();
+            }
+            catch (Exception ex) { Log.Ex("提权重启失败", ex); Warn("提权重启失败：" + ex.Message); }
+        }
+
+        // ────────────────────────────────────────────────────── 读数渲染辅助
+        private static Reading FindReading(List<Reading> list, string name)
+        {
+            for (int i = 0; i < list.Count; i++) if (list[i].Name == name) return list[i];
+            return null;
+        }
+
+        /// <summary>温度类读数 → 档位（颜色之外还要给档位字，见 docs/UI-DESIGN.md §1.2）。</summary>
+        private static int LevelOf(Reading r)
+        {
+            if (r == null || !r.Ok || r.Name.IndexOf("温度") < 0) return 0;
+            string v, u;
+            Ui.SplitUnit(r.Value, out v, out u);
+            double d;
+            if (!double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) return 0;
+            return Ui.LevelFor(d);
+        }
+
+        private static void ApplyBig(BigReadout b, List<Reading> list, string name, string caption, bool isTemp)
+        {
+            Reading r = FindReading(list, name);
+            if (r == null || !r.Ok) { b.Set("", "", caption, 0, false); return; }
+            string v, u;
+            Ui.SplitUnit(Ui.Tidy(r.Value), out v, out u);
+            int lv = 0;
+            if (isTemp)
+            {
+                double d;
+                if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) lv = Ui.LevelFor(d);
+            }
+            b.Set(v, u, caption, lv, true);
+        }
         private void SyncTrayUi()
         {
             _trayUiSync = true;
@@ -2187,36 +2192,18 @@ namespace OpenMIFS
             _sensorBusy = true;
             ThreadPool.QueueUserWorkItem(delegate
             {
-                string text = null;
+                List<Reading> list = null;
+                string render = null;
                 string err = null;
-                string hint = null;
                 double ms = 0;
+                int ok = 0, fail = 0;
                 try
                 {
                     DateTime t0 = DateTime.Now;
-                    List<Reading> list = Sensors.ReadAll();
+                    list = Sensors.ReadAll();
                     ms = (DateTime.Now - t0).TotalMilliseconds;
-
-                    // 面板上的固定阅读顺序：温度 → 功耗 → 频率 → 负载 …（按用户要求）
-                    List<Reading> ordered = new List<Reading>();
-                    for (int i = 0; i < SensorOrder.Length; i++)
-                        for (int j = 0; j < list.Count; j++)
-                            if (list[j].Name == SensorOrder[i]) { ordered.Add(list[j]); break; }
-                    for (int j = 0; j < list.Count; j++) if (!ordered.Contains(list[j])) ordered.Add(list[j]);
-
-                    StringBuilder sb = new StringBuilder();
-                    int ok = 0, fail = 0;
-                    for (int i = 0; i < ordered.Count; i++)
-                    {
-                        sb.AppendLine(ordered[i].Name + " : " + ordered[i].Value);
-                        if (ordered[i].Note.Length > 0) sb.AppendLine("└ " + ordered[i].Note);
-                        if (ordered[i].Ok) ok++; else fail++;
-                    }
-                    text = sb.ToString();
-                    hint = "可用 " + ok.ToString(CultureInfo.InvariantCulture)
-                         + " 项 · 未实现 " + fail.ToString(CultureInfo.InvariantCulture)
-                         + " 项 · " + DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture)
-                         + " · 只读（PDH + WMI + MIFS）";
+                    render = Sensors.Render(list);
+                    for (int i = 0; i < list.Count; i++) { if (list[i].Ok) ok++; else fail++; }
                 }
                 catch (Exception ex) { err = ex.Message; Log.Ex("读取传感器失败", ex); }
 
@@ -2227,17 +2214,42 @@ namespace OpenMIFS
                     BeginInvoke((MethodInvoker)delegate
                     {
                         _sensorBusy = false;
-                        if (err != null) { _lblSensorHint.Text = "读取失败：" + err + "（详见日志）"; return; }
-                        SetRows(_pnlSensorRows, _sensorOrder, _sensorRows, text);
-                        TrayText.CaptureSensorText(text);
-                        _lblSensorHint.Text = hint;
+                        if (err != null)
+                        {
+                            _lblSensorHint.ForeColor = Ui.Scald;
+                            _lblSensorHint.Text = "读取失败：" + err + "（详见日志）";
+                            return;
+                        }
+                        ApplyBig(_big[0], list, "CPU 温度", "温度", true);
+                        ApplyBig(_big[1], list, "CPU 功耗", "功耗", false);
+                        for (int i = 0; i < _rowNames.Count; i++)
+                        {
+                            Reading r = FindReading(list, _rowNames[i]);
+                            if (r == null) { _rows[i].Set("—", "", false, 0); continue; }
+                            if (!r.Ok)
+                            {
+                                // 不可用 → 值列只放 "—"，原因进 ToolTip（不再把"未实现"当数值渲染）
+                                _rows[i].Set("—", "", false, 0);
+                                _tips.SetToolTip(_rows[i].ValueLabel,
+                                    r.Name + " 不可用" + (r.Note.Length > 0 ? "：" + r.Note : "") + "（" + r.Group + "）");
+                                continue;
+                            }
+                            _rows[i].Set(Ui.Tidy(r.Value), true, LevelOf(r));
+                            if (r.Note.Length > 0)
+                                _tips.SetToolTip(_rows[i].ValueLabel, r.Note + "（" + r.Group + "）");
+                        }
+                        _lblEnv.Text = "读数 " + ok.ToString(CultureInfo.InvariantCulture) + " / "
+                            + (ok + fail).ToString(CultureInfo.InvariantCulture) + " 项可用";
+                        _lblSensorHint.ForeColor = Ui.Label;
+                        _lblSensorHint.Text = fail > 0
+                            ? "有 " + fail.ToString(CultureInfo.InvariantCulture) + " 项未实现（读数区显示为 —）"
+                            : "";
+                        TrayText.CaptureSensorText(render);
                     });
                 }
                 catch { _sensorBusy = false; }
             });
-        }
-
-        private void OnSensorProbeClick(object sender, EventArgs e)
+        }        private void OnSensorProbeClick(object sender, EventArgs e)
         {
             Cursor = Cursors.WaitCursor;
             try
@@ -2290,7 +2302,7 @@ namespace OpenMIFS
         private void OnModeClick(object sender, EventArgs e)
         {
             if (_suppress) return;
-            string name = (string)((Button)sender).Tag;
+            string name = (string)((Control)sender).Tag;
             int value = ModeMap.Value(name);
             try
             {
@@ -2419,7 +2431,7 @@ namespace OpenMIFS
             if (_suppress) return;
             try
             {
-                int lvl = (int)((Button)sender).Tag;
+                int lvl = (int)((Control)sender).Tag;
                 Log.Info("键盘背光 → 等级 " + lvl);
                 Mifs.SetByte(Mifs.FnRgbBright, (byte)lvl);
                 Thread.Sleep(150); RefreshAll(); PrimeOsdWatch();
@@ -2522,7 +2534,7 @@ namespace OpenMIFS
                 _chkDpi.Enabled = OsdDpi.FileExists;
                 _lblDpi.Text = !OsdDpi.FileExists ? "（未安装官方 OSD）"
                     : (on ? "已应用 ~ HIGHDPIAWARE" : "未应用");
-                _lblDpi.ForeColor = on ? ColOk : ColDim;
+                _lblDpi.ForeColor = on ? Ui.Cold : Ui.Muted;
             }
             catch (Exception ex) { Log.Ex("刷新 DPI 修复状态失败", ex); }
             _suppress = prev;
@@ -2539,7 +2551,7 @@ namespace OpenMIFS
                 string text = Osd.Diagnose();
                 string file = Path.Combine(Log.Folder, "osd-diagnose.txt");
                 // 首页不再放文本转储：只把结论塞进状态行，完整报告写文件
-                SetRow(_pnlStatusRows, _statusOrder, _statusRows, "OSD 诊断", Osd.Healthy(st) ? "服务与进程正常" : "异常，见报告");
+            Log.Info("OSD 诊断：" + (Osd.Healthy(st) ? "服务与进程正常，见报告" : "异常，见报告"));
                 MessageBox.Show(this,
                     "诊断完成。" + Environment.NewLine + Environment.NewLine
                     + "服务：" + st.ServiceState + "    界面进程：" + st.UtilityCount + " 个" + Environment.NewLine
@@ -2588,7 +2600,7 @@ namespace OpenMIFS
                 bool prev = _suppress;
                 _suppress = true;
                 _chkStartup.Checked = on;
-                _chkStartup.Text = on ? "开机自启（已启用 · 静默进托盘）" : "开机自启（计划任务 · 免 UAC · 静默进托盘）";
+                _chkStartup.Text = on ? "开机自启（已启用，静默进托盘）" : "开机自启（登录时静默进托盘）";
                 _suppress = prev;
             }
             catch (Exception ex) { Log.Ex("查询开机自启状态失败", ex); }
@@ -2599,20 +2611,19 @@ namespace OpenMIFS
             if (!force && (DateTime.Now - _lastOsdCheck).TotalSeconds < 8) return;
             _lastOsdCheck = DateTime.Now;
             Osd.State s = Osd.Query();
-            _osdStatus = Osd.StatusLine(s);
-            _lblOsd.Text = _osdStatus;
-            _lblOsd.ForeColor = Osd.Healthy(s) ? ColOk : ColWarn;
+            _osdOk = Osd.Healthy(s);
+            _osdStatus = _osdOk ? "正常" : Osd.StatusLine(s);
             RefreshDpiState();
         }
 
         public void RefreshAll()
         {
             _suppress = true;
-            StringBuilder sb = new StringBuilder();
+            StringBuilder snap = new StringBuilder();     // 只喂托盘快照，界面渲染全部走结构化控件
             bool anyOk = false;
-            List<string> missing = new List<string>();
+            List<string> unavailable = new List<string>();
 
-            // ── 性能模式
+            // ── 性能模式（回读贴在分段控件旁；镜像状态面板已取消）
             int? pm = Mifs.GetByte(Mifs.FnPerMode);
             if (pm.HasValue)
             {
@@ -2622,164 +2633,114 @@ namespace OpenMIFS
                 {
                     bool cur = ModeMap.Value(ModeMap.Order[i]) == mv;
                     _btnMode[i].Enabled = true;
-                    _btnMode[i].Text = (cur ? "\u25CF " : "\u25CB ") + ModeMap.Order[i];
-                    _btnMode[i].Font = cur ? _fontBold : _fontUi;
+                    _btnMode[i].Selected = cur;
                 }
-                sb.AppendLine("性能模式     : " + ModeMap.Label(mv));
+                _lblModeNote.ForeColor = Ui.Label;
+                _lblModeNote.Text = "已生效：" + ModeMap.Label(mv);
+                _lblBadgeMode.Text = ModeMap.Label(mv);
+                _lblBadgeMode.ForeColor = Ui.Ink;
+                snap.AppendLine("性能模式 : " + ModeMap.Label(mv));
             }
             else
             {
-                for (int i = 0; i < _btnMode.Length; i++)
-                {
-                    _btnMode[i].Enabled = false;
-                    _btnMode[i].Text = ModeMap.Order[i] + "（未实现）";
-                }
-                missing.Add("性能模式");
-                sb.AppendLine("性能模式     : 未实现");
+                for (int i = 0; i < _btnMode.Length; i++) { _btnMode[i].Enabled = false; _btnMode[i].Selected = false; }
+                _lblModeNote.ForeColor = Ui.Muted;
+                _lblModeNote.Text = "不可用：接口未响应";
+                _lblBadgeMode.Text = "模式不可用";
+                _lblBadgeMode.ForeColor = Ui.Muted;
+                unavailable.Add("性能模式");
+                snap.AppendLine("性能模式 : 未实现");
             }
 
-            // ── 风扇转速
+            // ── 风扇转速：全场**只读这一次**（以前在三处显示、两个采样时刻，数值还会互相打架）
             int[] fans = Mifs.GetFans();
             if (fans != null)
             {
                 anyOk = true;
-                _lblFan.ForeColor = SystemColors.ControlText;
-                _lblFan.Text = string.Format(CultureInfo.InvariantCulture,
-                    "风扇1  {0} RPM      风扇2  {1} RPM{2}",
-                    fans[0], fans[1],
-                    fans[2] > 0 ? string.Format(CultureInfo.InvariantCulture, "      风扇3  {0} RPM", fans[2]) : "");
-                sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "风扇1        : {0} RPM", fans[0]));
-                sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "风扇2        : {0} RPM", fans[1]));
+                string cap = "风扇1";
+                if (fans[1] > 0) cap = "风扇1（风扇2 " + fans[1].ToString(CultureInfo.InvariantCulture) + "）";
+                _big[2].Set(fans[0].ToString(CultureInfo.InvariantCulture), "RPM", cap, 0, true);
+                snap.AppendLine("风扇1        : " + fans[0].ToString(CultureInfo.InvariantCulture) + " RPM");
+                if (fans[1] > 0) snap.AppendLine("风扇2        : " + fans[1].ToString(CultureInfo.InvariantCulture) + " RPM");
             }
             else
             {
-                _fanBoostUsable = false;
-                _lblFan.ForeColor = ColDim;
-                _lblFan.Text = "风扇转速：本机未实现";
-                missing.Add("风扇转速");
-                sb.AppendLine("风扇转速     : 未实现");
+                _big[2].Set("", "", "风扇", 0, false);
+                unavailable.Add("风扇转速");
+                snap.AppendLine("风扇转速     : 未实现");
             }
 
-            // ── 风扇满速（可写开关，靠能力缓存 + 写后读回判定；结论与当时的供电类型绑定）
-            bool boostReadable = false;
+            // ── 供电（徽标）
             int acType = Mifs.GetByte(Mifs.FnAcType) ?? -1;
             _acTypeNow = acType;
+            _lblBadgeAc.Text = acType >= 0 ? Ui.AcText(acType) : "供电未知";
+            _lblBadgeAc.ForeColor = acType >= 0 ? Ui.Label : Ui.Muted;
+
+            // ── 风扇满速：按钮文案短；受限原因就地写在按钮下方（N3）
+            bool boostReadable = false;
             int? mxs = Mifs.GetByte(Mifs.FnMaxFanSwitch);
-            if (mxs.HasValue)
-            {
-                boostReadable = true;
-                _fanBoostOn = mxs.Value == 1;
-            }
+            if (mxs.HasValue) { boostReadable = true; _fanBoostOn = mxs.Value == 1; }
             bool capsValid = Caps.ValidFor(acType);
             if (!capsValid)
             {
-                _fanBoostUsable = boostReadable;   // 未检测（或换了电源）：允许点一次，点后按读回结果定性
+                _fanBoostUsable = boostReadable;
                 _btnBoost.Enabled = boostReadable;
-                _btnBoost.Text = boostReadable
-                    ? "风扇满速：" + (_fanBoostOn ? "开" : "关") + "（未检测）"
-                    : "风扇满速：未实现";
-                _btnBoost.Font = _fontUi;
-                sb.AppendLine("风扇满速     : " + (boostReadable ? (_fanBoostOn ? "开" : "关") + "（未检测，点击后自动判定）" : "未实现"));
+                _btnBoost.Selected = _fanBoostOn;
+                _btnBoost.Text = "风扇满速" + (boostReadable ? " · " + (_fanBoostOn ? "开" : "关") : "");
+                _lblBoostNote.ForeColor = Ui.Label;
+                _lblBoostNote.Text = boostReadable ? "尚未实测：点一次即按转速判定" : "不可用";
             }
             else if (Caps.FanBoost.Value && boostReadable)
             {
                 _fanBoostUsable = true;
                 _btnBoost.Enabled = true;
-                _btnBoost.Text = "风扇满速：" + (_fanBoostOn ? "开" : "关");
-                _btnBoost.Font = _fanBoostOn ? _fontBold : _fontUi;
-                sb.AppendLine("风扇满速     : " + (_fanBoostOn ? "开" : "关"));
+                _btnBoost.Selected = _fanBoostOn;
+                _btnBoost.Text = "风扇满速 · " + (_fanBoostOn ? "开" : "关");
+                _lblBoostNote.ForeColor = Ui.Label;
+                _lblBoostNote.Text = "已实测可用";
             }
             else
             {
                 _fanBoostUsable = false;
                 _btnBoost.Enabled = false;
-                _btnBoost.Text = "风扇满速：未实现";
-                _btnBoost.Font = _fontUi;
-                if (acType == 1)
-                {
-                    // 上游驱动文档：Type-C(PD) 供电下性能/满速模式与风扇满速被硬件禁用
-                    _btnBoost.Text = "风扇满速（Type-C 供电下被禁用）";
-                    sb.AppendLine("风扇满速     : 被电源类型禁用（Type-C 供电）");
-                }
-                else
-                {
-                    missing.Add("风扇满速");
-                    sb.AppendLine("风扇满速     : 未实现（EC 忽略写入）");
-                }
+                _btnBoost.Selected = false;
+                _btnBoost.Text = "风扇满速";
+                _lblBoostNote.ForeColor = Ui.Warm;
+                _lblBoostNote.Text = acType == 1
+                    ? "受 Type-C 供电限制（插圆口电源可解锁）"
+                    : "本机 EC 忽略该写入";
             }
 
-            // ── Fn 锁
-            int? fnl = Mifs.GetByte(Mifs.FnFnLock);
-            if (fnl.HasValue)
-            {
-                _chkFn.Enabled = true;
-                _chkFn.Text = "Fn 锁";
-                _chkFn.Checked = fnl.Value == 1;
-                sb.AppendLine("Fn 锁        : " + (_chkFn.Checked ? "开" : "关"));
-            }
-            else
-            {
-                _chkFn.Enabled = false;
-                _chkFn.Text = "Fn 锁（未实现）";
-                missing.Add("Fn 锁");
-                sb.AppendLine("Fn 锁        : 未实现");
-            }
+            // ── 硬件开关（复选框本身就是回读）
+            int? fn = Mifs.GetByte(Mifs.FnFnLock);
+            if (fn.HasValue) { anyOk = true; _chkFn.Enabled = true; _chkFn.Checked = fn.Value == 1; }
+            else { _chkFn.Enabled = false; _chkFn.Checked = false; unavailable.Add("Fn 锁"); }
 
-            // ── 触控板锁
-            int? tpl = Mifs.GetByte(Mifs.FnTpLock);
-            if (tpl.HasValue)
-            {
-                _chkTp.Enabled = true;
-                _chkTp.Text = "触控板锁定";
-                _chkTp.Checked = tpl.Value == 1;
-                sb.AppendLine("触控板锁     : " + (_chkTp.Checked ? "已锁定" : "正常"));
-            }
-            else
-            {
-                _chkTp.Enabled = false;
-                _chkTp.Text = "触控板锁（未实现）";
-                missing.Add("触控板锁");
-                sb.AppendLine("触控板锁     : 未实现");
-            }
+            int? tp = Mifs.GetByte(Mifs.FnTpLock);
+            if (tp.HasValue) { anyOk = true; _chkTp.Enabled = true; _chkTp.Checked = tp.Value == 1; }
+            else { _chkTp.Enabled = false; _chkTp.Checked = false; unavailable.Add("触控板锁"); }
 
             // ── 键盘背光
             int? kbd = Mifs.GetByte(Mifs.FnRgbBright);
-            _gbKbd.Text = kbd.HasValue ? "键盘背光亮度" : "键盘背光亮度（未实现）";
             for (int i = 0; i < _btnKbd.Length; i++)
             {
-                if (!kbd.HasValue)
-                {
-                    _btnKbd[i].Enabled = false;
-                    _btnKbd[i].Text = "—";
-                    continue;
-                }
-                _btnKbd[i].Enabled = true;
-                _btnKbd[i].Text = i.ToString(CultureInfo.InvariantCulture);
-                bool cur = kbd.Value == i;
-                _btnKbd[i].Font = cur ? _fontBold : _fontUi;
+                if (kbd.HasValue) { _btnKbd[i].Enabled = true; _btnKbd[i].Selected = kbd.Value == i; }
+                else { _btnKbd[i].Enabled = false; _btnKbd[i].Selected = false; }
             }
             if (kbd.HasValue)
             {
-                sb.AppendLine("键盘背光     : 等级 " + kbd.Value.ToString(CultureInfo.InvariantCulture));
+                anyOk = true;
+                _lblKbdNote.ForeColor = Ui.Label;
+                _lblKbdNote.Text = "当前等级 " + kbd.Value.ToString(CultureInfo.InvariantCulture);
             }
             else
             {
-                missing.Add("键盘背光");
-                sb.AppendLine("键盘背光     : 未实现");
+                _lblKbdNote.ForeColor = Ui.Muted;
+                _lblKbdNote.Text = "不可用";
+                unavailable.Add("键盘背光");
             }
 
-            // ── 供电
-            int? ac = Mifs.GetByte(Mifs.FnAcType);
-            if (ac.HasValue)
-            {
-                string t = ac.Value == 1 ? "外接电源" : (ac.Value == 0 ? "电池供电" : "原始值 " + ac.Value);
-                sb.AppendLine("供电         : " + t);
-            }
-
-            // ── MIFS 的 CPU 温度/功率（功能号 22/23，本机恒为 0）
-            // **故意不计入顶部"未实现"清单**：CPU 温度/功耗已由 AMD 通道（ADL PMLog）与 PDH 提供，
-            // 把"MIFS CPU 温度"列出来只会让人误读成"这台机器读不到 CPU 温度"。
-            // 只探测一次、写一条日志备查（面板上由传感器区负责显示）。
+            // ── MIFS 功能号 22/23（恒为 0，只探测一次写日志；不计入"不可用"，因为面板温度走 AMD 通道）
             if (!_mifsTempPowerChecked)
             {
                 _mifsTempPowerChecked = true;
@@ -2790,66 +2751,51 @@ namespace OpenMIFS
                 Log.Info("MIFS 功能号 22/23（CPU 温度/功率）："
                     + (ct.HasValue ? ct.Value.ToString(CultureInfo.InvariantCulture) : "读取失败") + " / "
                     + (cp.HasValue ? cp.Value.ToString(CultureInfo.InvariantCulture) : "读取失败")
-                    + (ctOk && cpOk ? " → 可用" : " → 该功能号在本机未实现；面板改用 AMD 通道（ADL PMLog）+ PDH"));
+                    + (ctOk && cpOk ? " → 可用" : " → 该功能号在本机未实现；面板改用 AMD 通道（ADL PMlog）+ PDH"));
             }
 
-            // ── OSD
+            // ── OSD 徽标（N14：正常时只说"正常"）
             RefreshOsdState(false);
-            sb.AppendLine("OSD          : " + _osdStatus);
+            _lblBadgeOsd.Text = "OSD " + _osdStatus;
+            _lblBadgeOsd.ForeColor = _osdOk ? Ui.Cold : Ui.Warm;
 
-            // ── 开机自启
+            // ── 开机自启（复选框即回读）
             if ((DateTime.Now - _lastStartupCheck).TotalSeconds > 20)
             {
                 _lastStartupCheck = DateTime.Now;
                 RefreshStartupState();
             }
-            sb.AppendLine("开机自启     : " + (_chkStartup.Checked ? "已启用（计划任务）" : "未启用"));
 
-            // ── 顶部状态条
-            if (anyOk)
+            // ── 状态条右侧：时间；未提权时给一键提权重启
+            _lblClock.Text = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+            _btnElevate.Visible = !MifsApp.IsElevated;
+            if (!anyOk)
             {
-                _lblHeader.ForeColor = ColOk;
-                string head = "OpenMIFS v" + MifsApp.VersionText + " · 接口正常 · " + (MifsApp.IsElevated ? "已提权" : "未提权") + " · 托盘常驻"
-                            + (Log.Available ? " · 日志已开启" : " · 日志不可用（只读目录？）");
-                // 没有任何缺失就只留一行（"无，全部功能可用" 属于噪音）
-                if (missing.Count > 0)
-                {
-                    string miss = string.Join("、", missing.ToArray());
-                    if (miss.Length > 56) miss = miss.Substring(0, 56) + "…";
-                    head += "\r\n本机不支持：" + miss + "（其余功能正常）";
-                }
-                _lblHeader.Text = head;
+                _lblBadgeMode.Text = "接口不可用";
+                _lblBadgeMode.ForeColor = Ui.Scald;
             }
+
+            // ── 不可用清单（只在真的缺功能时出现）
+            if (unavailable.Count == 0) _lblUnavail.Text = "";
             else
             {
-                _lblHeader.ForeColor = ColWarn;
-                _lblHeader.Text = "接口不可用 · " + Mifs.LastError
-                                + "\r\n请确认以管理员身份运行，且本机 BIOS 暴露了 MIFS 接口";
-                if (_lastLoggedError != Mifs.LastError)
-                {
-                    _lastLoggedError = Mifs.LastError;
-                    Log.Error("MIFS 接口不可用：" + Mifs.LastError);
-                }
+                string miss = string.Join("、", unavailable.ToArray());
+                if (miss.Length > 40) miss = miss.Substring(0, 40) + "…";
+                _lblUnavail.Text = "不可用：" + miss;
             }
 
-
-            SetRows(_pnlStatusRows, _statusOrder, _statusRows, sb.ToString());
-            TrayText.CaptureStatusText(sb.ToString());
-            if (_gbTray != null) RefreshTrayPreview();
-
+            TrayText.CaptureStatusText(snap.ToString());
+            RefreshTrayPreview();
             _suppress = false;
+
             if (!_firstRefreshDone)
             {
                 _firstRefreshDone = true;
-                Log.Info("首次刷新完成：接口可用=" + anyOk + " 未实现=" + (missing.Count == 0 ? "无" : string.Join("、", missing.ToArray()))
-                    + " OSD状态=" + _osdStatus);
+                Log.Info("首次刷新完成：接口可用=" + anyOk + " 不可用项=" + (unavailable.Count == 0 ? "无" : string.Join("、", unavailable.ToArray()))
+                    + " OSD=" + _osdStatus);
             }
-            if (StateChanged != null) StateChanged(this, EventArgs.Empty);
-
-            // 传感器只在「传感器」页可见时读取（PDH 有开销，没必要后台一直采）
             RefreshSensors();
         }
-
         private DateTime _lastStartupCheck = DateTime.MinValue;
     }
 
@@ -3903,7 +3849,7 @@ namespace OpenMIFS
                 if (MifsApp.IsElevated) Startup.RepairIfNeeded();   // 老任务不带 --tray 会自动重建
 
                 try { Application.Run(new TrayContext(tray)); }
-                catch (Exception ex) { Log.Ex("主循环异常退出", ex); throw; }
+                catch (Exception ex) { Log.Ex("主循环异常退出", ex); if (ex.StackTrace != null) Log.Info("异常堆栈：" + ex.StackTrace.Replace("\r\n", " | ")); throw; }
                 finally { Log.Info("================ OpenMIFS 退出 ================"); }
             }
         }

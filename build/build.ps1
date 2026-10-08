@@ -34,7 +34,8 @@ if (-not $Icon)   { $Icon   = Join-Path $repoRoot 'assets\icon.ico' }
 
 $sources  = @(
     (Join-Path $repoRoot 'src\csharp\OpenMIFS.cs'),
-    (Join-Path $repoRoot 'src\csharp\Sensors.cs')
+    (Join-Path $repoRoot 'src\csharp\Sensors.cs'),
+    (Join-Path $repoRoot 'src\csharp\Ui.cs')
 )
 $manifest = Join-Path $repoRoot 'src\csharp\app.manifest'
 $outExe   = Join-Path $OutDir  'OpenMIFS.exe'

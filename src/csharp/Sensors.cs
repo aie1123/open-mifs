@@ -520,9 +520,11 @@ namespace OpenMIFS
                 double best = 0;
                 foreach (KeyValuePair<string, double> kv in byType)
                     if (kv.Value > best) { best = kv.Value; busiest = kv.Key; }
+                // 面板只放最忙引擎的占用；合计放说明里（值列宽度有限，长串会挤掉单位列）
                 list.Add(new Reading("GPU", "GPU 利用率",
-                    string.Format(CultureInfo.InvariantCulture, "{0} {1:0.0} %（合计 {2:0.0} %）", busiest, best, total),
-                    true, "WMI GPU Engine（Windows 原生）"));
+                    string.Format(CultureInfo.InvariantCulture, "{0} {1:0.0} %", busiest, best),
+                    true,
+                    string.Format(CultureInfo.InvariantCulture, "最忙引擎：{0}；全部引擎合计 {1:0.0} %。来源 WMI GPU Engine（Windows 原生）", busiest, total)));
             }
             else
             {
