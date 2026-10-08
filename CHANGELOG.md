@@ -15,6 +15,47 @@
 - 记下一条可复用的判据规矩：凡"写入是否真的生效"，都要找一个**独立于寄存器镜像的物理量**
   （风扇看转速、性能模式看实测性能百分比、充电看实际注入电量）—— 这次误判就是只看了寄存器镜像
 
+## [0.5.4] - 2026-10-08
+
+### 修复：从托盘点「显示主界面」导致栈溢出崩溃（0xC00000FD）
+
+**现象**：窗口先被最小化、再收进托盘后，从托盘菜单点「显示主界面」→ 进程瞬间消失
+（无异常日志、无退出记录）。Windows 事件日志：
+
+```
+出错应用程序名称：OpenMIFS.exe，版本 0.5.3.0
+出错模块名称：System.Windows.Forms.ni.dll
+异常代码：0xc00000fd            ← STATUS_STACK_OVERFLOW
+```
+
+**根因（互递归）**：
+
+```csharp
+Resize += delegate { if (WindowState == FormWindowState.Minimized) HideToTray(); };
+```
+
+`HideToTray()` 会改 `ShowInTaskbar` → 触发窗口句柄重建/重新布局 → **再次引发 `Resize`**；
+而它**从不重置 `WindowState`**，于是判定条件永远为真 → `Resize → HideToTray → Resize → …`
+无限互递归。`Restore()` 里 `ShowInTaskbar = true` 同样会引发这一串。
+
+**修复**（三处）：
+
+1. 新增 `_visibilityBusy` 互斥：`HideToTray()` / `Restore()` 进入即置位，`Resize` 处理器见到置位直接返回
+2. `HideToTray()` 结束后把 `WindowState` **归位为 Normal**（让判定条件不再恒真）
+3. `Restore()` **先归位 WindowState，再做**会引发句柄重建的操作（顺序反了同样会重入）
+
+### 新增：可见性切换回归模式
+
+`OpenMIFS.exe --toggle-test=3`：隐藏启动 → 置为"最小化 + 已隐藏" → 反复切换可见性并记录，
+用于回归这条历史崩溃路径（N 默认 3，可用 `--toggle-test=N` 指定）。
+
+### 验证
+
+| 阶段 | 结果 |
+| :--- | :--- |
+| 修复前复现 | 进程退出码 **-1073741571 = 0xC00000FD**（与用户崩溃一致），第一次切换即死，事件日志新增 Application Error |
+| 修复后回归 3 次 | 退出码 **0**，日志出现「全部完成，未崩溃」，事件日志**无新增**崩溃记录 |
+
 ## [0.5.3] - 2026-10-04
 
 ### 新增：托盘图标变色阈值可配置

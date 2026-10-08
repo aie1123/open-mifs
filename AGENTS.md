@@ -1,4 +1,4 @@
-# AGENTS.md — OpenMIFS 项目约定
+﻿# AGENTS.md — OpenMIFS 项目约定
 
 > 给 AI 编码助手（以及新加入的人）看的。**动手前先读完这页**，这里写的都是踩过坑换来的。
 
@@ -80,6 +80,15 @@
 6. **收尾必须删除临时目录与 `%LOCALAPPDATA%\OpenMIFS_<tag>`**
 
 截图套路：`GetWindowRect` + `CopyFromScreen`；先 `SetProcessDPIAware()`。
+
+**回归模式**：`o.exe --toggle-test=3` 会"隐藏启动 → 置为最小化+已隐藏 → 反复切换可见性"，
+用于守住历史上那条栈溢出崩溃路径（见 CHANGELOG 0.5.4）。改可见性相关代码后跑它。
+
+**UI 可见性切换的铁律**（0.5.4 血案）：
+`HideToTray()` / `Restore()` 会改 `ShowInTaskbar`，从而**触发句柄重建 → 再次引发 `Resize`**。
+所以：① 必须有防重入标志；② `HideToTray()` 必须把 `WindowState` 归位（否则 `Resize` 里的
+"== Minimized" 判定恒真）；③ `Restore()` 要先归位 WindowState 再做显示操作。
+栈溢出的表现是**进程静默消失**（无异常日志），只能靠事件日志的 `0xc00000fd` 认出来。
 窗口可能开在虚拟显示器上 → 抓不到就用 `MoveWindow` 挪到固定坐标（提权窗口挪不动，受 UIPI 限制）。
 
 ---

@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.5.3.0")]
-[assembly: AssemblyFileVersion("0.5.3.0")]
+[assembly: AssemblyVersion("0.5.4.0")]
+[assembly: AssemblyFileVersion("0.5.4.0")]
 
 namespace OpenMIFS
 {
@@ -1316,7 +1316,13 @@ namespace OpenMIFS
             _osdWatch.Start();
 
             Shown += delegate { RefreshAll(); };
-            Resize += delegate { if (WindowState == FormWindowState.Minimized) HideToTray(); };
+            // 注意：HideToTray/Restore 会改 ShowInTaskbar（触发句柄重建），从而再次引发 Resize。
+            // 必须防重入，否则"最小化后收进托盘 → 点显示主界面"会无限互递归 → 栈溢出崩溃（0xC00000FD）。
+            Resize += delegate
+            {
+                if (_visibilityBusy) return;
+                if (WindowState == FormWindowState.Minimized) HideToTray();
+            };
             FormClosing += OnFormClosing;
         }
 
@@ -1341,8 +1347,19 @@ namespace OpenMIFS
 
         internal void HideToTray()
         {
+            if (_visibilityBusy) return;             // 防重入（见 Resize 处说明）
+            _visibilityBusy = true;
+            try { HideToTrayCore(); }
+            finally { _visibilityBusy = false; }
+        }
+
+        private void HideToTrayCore()
+        {
             Hide();
             ShowInTaskbar = false;
+            // 关键：把 WindowState 归位。否则 Resize 的判定条件（== Minimized）会一直为真，
+            // 任何一次重新布局都会再次调用 HideToTray，进而在句柄重建时无限递归。
+            if (WindowState != FormWindowState.Normal) WindowState = FormWindowState.Normal;
             if (!_trayHintShown && StateChanged != null)
             {
                 _trayHintShown = true;
@@ -1352,11 +1369,21 @@ namespace OpenMIFS
 
         private void Restore()
         {
+            if (_visibilityBusy) return;
+            _visibilityBusy = true;
+            try { RestoreCore(); }
+            finally { _visibilityBusy = false; }
+            RefreshAll();                            // 放在互斥区外：刷新会间接触发布局
+        }
+
+        private void RestoreCore()
+        {
+            // 顺序很重要：先把 WindowState 归位，再做"会引发句柄重建/重新布局"的操作，
+            // 这样 Resize 处理器看到的永远是 Normal，不会反过来调 HideToTray。
+            if (WindowState != FormWindowState.Normal) WindowState = FormWindowState.Normal;
             ShowInTaskbar = true;
             Show();
-            WindowState = FormWindowState.Normal;
             Activate();
-            RefreshAll();
         }
 
         public void ToggleVisible()
@@ -1837,6 +1864,7 @@ namespace OpenMIFS
         private readonly Label[] _lblTrayThUnit = new Label[] { new Label(), new Label(), new Label() };
         private readonly TextBox[] _txtTrayTh = new TextBox[] { new TextBox(), new TextBox(), new TextBox() };
         private bool _trayUiSync;
+        private bool _visibilityBusy;     // HideToTray/Restore 互斥，防止与 Resize 互递归
         private bool _mifsTempPowerChecked;
         private readonly ToolTip _tips = new ToolTip();
 
@@ -3556,6 +3584,18 @@ namespace OpenMIFS
             _suppress = false;
         }
 
+        internal void ToggleForTest() { _form.ToggleVisible(); }
+
+        internal void MinimizeForTest()
+        {
+            // 关键前置条件：WindowState=Minimized（用户点过最小化）且已收进托盘
+            _form.WindowState = FormWindowState.Minimized;
+            _form.HideToTray();
+            Log.Info("回归：已置为 最小化+隐藏（WindowState=" + _form.WindowState + " Visible=" + _form.Visible + "）");
+        }
+
+        internal void ExitForTest() { ExitApp(); }
+
         private void ExitApp()
         {
             if (_exiting) return;
@@ -3579,6 +3619,7 @@ namespace OpenMIFS
             bool sensors = false;
             bool tray = false;
             bool iconPreview = false;
+            int toggleTest = 0;
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i].ToLowerInvariant();
@@ -3586,6 +3627,12 @@ namespace OpenMIFS
                 if (a == "--sensors" || a == "-s" || a == "/sensors") sensors = true;
                 if (a == "--tray" || a == "-t" || a == "/tray" || a == "--silent" || a == "--minimized") tray = true;
                 if (a == "--icon-preview" || a == "--icon") iconPreview = true;
+                if (a.StartsWith("--toggle-test"))
+                {
+                    string num = a.Substring("--toggle-test".Length).TrimStart('=');
+                    int n2;
+                    toggleTest = int.TryParse(num, out n2) && n2 > 0 ? n2 : 3;
+                }
             }
 
             // 无界面模式：把托盘图标的各种取值画出来（放大 6 倍拼成一张图），用于确认 16×16 下是否可读
@@ -3661,6 +3708,28 @@ namespace OpenMIFS
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+
+            // 回归模式：复现"最小化 → 收进托盘 → 点显示主界面"这条路径（历史上有过栈溢出崩溃）
+            if (toggleTest > 0)
+            {
+                Log.Info("================ OpenMIFS " + MifsApp.VersionText + " 可见性切换回归（" + toggleTest + " 次）================ ");
+                TrayContext tc = new TrayContext(true);
+                tc.MinimizeForTest();
+                int done = 0;
+                System.Windows.Forms.Timer reg = new System.Windows.Forms.Timer();
+                reg.Interval = 1500;
+                reg.Tick += delegate
+                {
+                    done++;
+                    Log.Info("回归：第 " + done + " 次切换可见性");
+                    tc.ToggleForTest();
+                    if (done >= toggleTest) { reg.Stop(); Log.Info("回归：全部完成，未崩溃"); tc.ExitForTest(); }
+                };
+                reg.Start();
+                try { Application.Run(tc); }
+                catch (Exception ex) { Log.Ex("回归模式异常", ex); }
+                return;
+            }
 
             bool createdNew;
             using (Mutex mutex = new Mutex(true, "Global\\OpenMIFS_SingleInstance", out createdNew))
