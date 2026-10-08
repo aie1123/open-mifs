@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.5.5.0")]
-[assembly: AssemblyFileVersion("0.5.5.0")]
+[assembly: AssemblyVersion("0.5.6.0")]
+[assembly: AssemblyFileVersion("0.5.6.0")]
 
 namespace OpenMIFS
 {
@@ -1303,7 +1303,7 @@ namespace OpenMIFS
             TrayIcon.Load();
             TrayIcon.LoadThresholds();
             SyncTrayUi();
-            SyncTrayThresholds();
+            RefreshTrayThresholdRow();
 
             _osdHintMode = Settings.Get("osd_hint", "auto");
             _hintTimer.Interval = 350;   // 等官方 OSD 先画出来再决定要不要显示自带的
@@ -1695,50 +1695,54 @@ namespace OpenMIFS
             gOsd.Controls.Add(_lblDpi);
 
             // ── 托盘悬停提示：白名单勾选 + 最坏情况预算（放不下的直接拒绝勾选）
-            _gbTray = NewGroup("托盘悬停提示（按最坏宽度限额）", 516, 218);
+            _gbTray = NewGroup("托盘提示", 516, 252);
             _lstTray.CheckOnClick = true;
             _lstTray.Location = new Point(12, 20);
-            _lstTray.Size = new Size(214, 116);
+            _lstTray.Size = new Size(196, 172);
             _lstTray.Font = new Font("Microsoft YaHei UI", 9F);
             _lstTray.IntegralHeight = false;
             _lstTray.ItemCheck += OnTrayItemCheck;
             for (int i = 0; i < TrayText.All.Length; i++)
             {
                 TrayText.Item it = TrayText.All[i];
-                _lstTray.Items.Add(it.Label + "（≤" + it.Worst.ToString(CultureInfo.InvariantCulture) + "）");
+                _lstTray.Items.Add(it.Label);
             }
             _gbTray.Controls.Add(_lstTray);
+            _tips.SetToolTip(_lstTray, "勾选要显示在托盘悬停提示里的项目（顺序固定）。\r\n"
+                + "悬停提示最多 62 字符：勾到上限后，再加项会被拒绝 —— 先取消一项再勾。");
 
-            _lblTrayPreview.Location = new Point(234, 20);
-            _lblTrayPreview.Size = new Size(210, 66);
+            _lblTrayPreview.Location = new Point(216, 20);
+            _lblTrayPreview.Size = new Size(228, 100);
             _lblTrayPreview.Font = _fontUi8;
             _lblTrayPreview.BackColor = Color.FromArgb(246, 246, 248);
             _lblTrayPreview.BorderStyle = BorderStyle.FixedSingle;
             _lblTrayPreview.TextAlign = ContentAlignment.TopLeft;
             _gbTray.Controls.Add(_lblTrayPreview);
 
-            _lblTrayBudget.Location = new Point(234, 88);
-            _lblTrayBudget.Size = new Size(210, 18);
+            _lblTrayBudget.Location = new Point(216, 124);
+            _lblTrayBudget.Size = new Size(228, 16);
             _lblTrayBudget.Font = _fontUi8;
             _lblTrayBudget.TextAlign = ContentAlignment.MiddleLeft;
             _gbTray.Controls.Add(_lblTrayBudget);
 
             _btnTrayDefault.Text = "恢复默认";
-            _btnTrayDefault.Location = new Point(234, 108);
-            _btnTrayDefault.Size = new Size(96, 28);
+            _btnTrayDefault.Location = new Point(216, 144);
+            _btnTrayDefault.Size = new Size(104, 26);
             _btnTrayDefault.Font = new Font("Microsoft YaHei UI", 9F);
             _btnTrayDefault.Click += OnTrayDefaultClick;
             _gbTray.Controls.Add(_btnTrayDefault);
 
-            _lblTrayIcon.Location = new Point(12, 142);
-            _lblTrayIcon.Size = new Size(58, 18);
+            // 图标显示 + 变色阈值同一行：阈值只显示"当前图标数据源"的那一格（选 CPU 温度就只有温度阈值）
+            _lblTrayIcon.AutoSize = false;
+            _lblTrayIcon.Location = new Point(12, 196);
+            _lblTrayIcon.Size = new Size(72, 18);
             _lblTrayIcon.Font = _fontUi8;
             _lblTrayIcon.Text = "图标显示";
             _lblTrayIcon.TextAlign = ContentAlignment.MiddleLeft;
             _gbTray.Controls.Add(_lblTrayIcon);
 
             _cmbTrayIcon.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cmbTrayIcon.Location = new Point(72, 140);
+            _cmbTrayIcon.Location = new Point(88, 194);
             _cmbTrayIcon.Size = new Size(132, 22);
             _cmbTrayIcon.Font = _fontUi8;
             for (int i = 0; i < TrayIcon.Kinds.Length; i++) _cmbTrayIcon.Items.Add(TrayIcon.KindLabels[i]);
@@ -1746,36 +1750,43 @@ namespace OpenMIFS
             _cmbTrayIcon.SelectedIndexChanged += OnTrayIconKindChanged;
             _gbTray.Controls.Add(_cmbTrayIcon);
 
-            _lblTrayTh.Location = new Point(12, 168);
-            _lblTrayTh.Size = new Size(58, 18);
+            _lblTrayTh.AutoSize = false;
+            _lblTrayTh.Location = new Point(222, 196);
+            _lblTrayTh.Size = new Size(68, 18);
             _lblTrayTh.Font = _fontUi8;
             _lblTrayTh.Text = "变色阈值";
             _lblTrayTh.TextAlign = ContentAlignment.MiddleLeft;
             _gbTray.Controls.Add(_lblTrayTh);
 
-            string[] thUnit = new string[] { "温度", "功耗", "负载" };
+            // 三个带上下箭头的数字框：低/中/高三档分界（只显示当前图标数据源那一套）
             for (int i = 0; i < 3; i++)
             {
-                _lblTrayThUnit[i].Location = new Point(72 + i * 124, 168);
-                _lblTrayThUnit[i].Size = new Size(30, 18);
-                _lblTrayThUnit[i].Font = _fontUi8;
-                _lblTrayThUnit[i].Text = thUnit[i];
-                _lblTrayThUnit[i].TextAlign = ContentAlignment.MiddleLeft;
-                _gbTray.Controls.Add(_lblTrayThUnit[i]);
-
-                _txtTrayTh[i].Location = new Point(102 + i * 124, 166);
-                _txtTrayTh[i].Size = new Size(86, 21);
-                _txtTrayTh[i].Font = _fontUi8;
-                _txtTrayTh[i].Tag = TrayIcon.Kinds[i + 1];      // cput / cpup / cpul
-                _txtTrayTh[i].Text = TrayIcon.ThresholdText(TrayIcon.Kinds[i + 1]);
-                _txtTrayTh[i].Leave += OnTrayThresholdLeave;
-                _gbTray.Controls.Add(_txtTrayTh[i]);
+                _numTrayTh[i].Location = new Point(294 + i * 50, 194);
+                _numTrayTh[i].Size = new Size(46, 22);
+                _numTrayTh[i].Font = _fontUi8;
+                _numTrayTh[i].DecimalPlaces = 0;
+                _numTrayTh[i].TextAlign = HorizontalAlignment.Right;
+                _numTrayTh[i].ValueChanged += OnTrayThresholdValueChanged;
+                _gbTray.Controls.Add(_numTrayTh[i]);
             }
 
-            _lblTrayHint.Location = new Point(12, 192);
-            _lblTrayHint.Size = new Size(432, 18);
+            // 数字框右键 → 恢复该指标的默认阈值
+            ContextMenuStrip thMenu = new ContextMenuStrip();
+            ToolStripMenuItem thReset = new ToolStripMenuItem("恢复默认阈值");
+            thReset.Click += delegate
+            {
+                TrayIcon.ResetThresholdFor(TrayIcon.Kind);
+                RefreshTrayThresholdRow();
+                if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);
+                Log.Info("托盘图标：恢复默认阈值 " + TrayIcon.Kind);
+            };
+            thMenu.Items.Add(thReset);
+            for (int i = 0; i < 3; i++) _numTrayTh[i].ContextMenuStrip = thMenu;
+
+            _lblTrayHint.Location = new Point(12, 224);
+            _lblTrayHint.Size = new Size(432, 16);
             _lblTrayHint.Font = _fontUi8;
-            _lblTrayHint.Text = "阈值：三个升序数值（逗号分隔），如 55,70,85 = 绿/琥珀/橙/红四档分界";
+            _lblTrayHint.Text = "图标显示选「无」时不使用阈值。";
             _gbTray.Controls.Add(_lblTrayHint);
             // ── 右列：状态 + 传感器，直接摆在首页，键值行显示，随窗口缩放
             _pnlSensorBar.Dock = DockStyle.Bottom;
@@ -1890,8 +1901,7 @@ namespace OpenMIFS
         private readonly Label _lblTrayIcon = new Label();
         private readonly ComboBox _cmbTrayIcon = new ComboBox();
         private readonly Label _lblTrayTh = new Label();
-        private readonly Label[] _lblTrayThUnit = new Label[] { new Label(), new Label(), new Label() };
-        private readonly TextBox[] _txtTrayTh = new TextBox[] { new TextBox(), new TextBox(), new TextBox() };
+        private readonly NumericUpDown[] _numTrayTh = new NumericUpDown[] { new NumericUpDown(), new NumericUpDown(), new NumericUpDown() };
         private bool _trayUiSync;
         private bool _visibilityBusy;     // HideToTray/Restore 互斥，防止与 Resize 互递归
         private bool _mifsTempPowerChecked;
@@ -2011,9 +2021,10 @@ namespace OpenMIFS
         {
             string s = TrayText.Build();
             _lblTrayPreview.Text = s.Length > 0 ? s : "（当前没有可显示的项目）";
-            _lblTrayBudget.Text = "最坏情况 " + TrayText.WorstTotal().ToString(CultureInfo.InvariantCulture)
-                + "/" + TrayText.MaxChars.ToString(CultureInfo.InvariantCulture) + " 字符"
-                + "　实际 " + s.Length.ToString(CultureInfo.InvariantCulture) + " 字符";
+            _lblTrayBudget.Text = s.Length.ToString(CultureInfo.InvariantCulture) + "/"
+                + TrayText.MaxChars.ToString(CultureInfo.InvariantCulture) + " 字符";
+            _tips.SetToolTip(_lblTrayBudget, "悬停提示最多 62 字符（Win32 单行）。"
+                + "当前勾选项最坏情况 " + TrayText.WorstTotal().ToString(CultureInfo.InvariantCulture) + " 字符。");
         }
 
         private void OnTrayItemCheck(object sender, ItemCheckEventArgs e)
@@ -2025,9 +2036,9 @@ namespace OpenMIFS
             {
                 e.NewValue = CheckState.Unchecked;      // 放不下就不让勾
                 int withIt = TrayText.WorstTotal() + it.Worst + TrayText.Separator.Length;
-                _lblTrayHint.Text = "「" + it.Label + "」最坏要 " + it.Worst.ToString(CultureInfo.InvariantCulture)
-                    + " 字符，加上会到 " + withIt.ToString(CultureInfo.InvariantCulture)
-                    + "（上限 " + TrayText.MaxChars.ToString(CultureInfo.InvariantCulture) + "）→ 先取消一项再勾。";
+                _lblTrayHint.ForeColor = Color.FromArgb(176, 36, 36);
+                _lblTrayHint.Text = "加不上「" + it.Label + "」：会到 " + withIt.ToString(CultureInfo.InvariantCulture)
+                    + " 字符，超过上限 " + TrayText.MaxChars.ToString(CultureInfo.InvariantCulture) + " —— 先取消一项再勾。";
                 Log.Info("托盘提示：拒绝勾选 " + it.Id + "（最坏 " + withIt.ToString(CultureInfo.InvariantCulture) + " 字符）");
                 return;
             }
@@ -2036,7 +2047,8 @@ namespace OpenMIFS
                 e.NewValue = CheckState.Unchecked;
                 return;
             }
-            _lblTrayHint.Text = "上限 62 字符；图标上最多画 3 个字符";
+            _lblTrayHint.ForeColor = Color.FromArgb(110, 110, 116);
+            _lblTrayHint.Text = "图标显示选「无」时不使用阈值。";
             RefreshTrayPreview();
         }
 
@@ -2047,31 +2059,97 @@ namespace OpenMIFS
             if (i < 0 || i >= TrayIcon.Kinds.Length) return;
             TrayIcon.Save(TrayIcon.Kinds[i]);
             Log.Info("托盘图标：改为 " + TrayIcon.KindLabel() + "（" + TrayIcon.Kinds[i] + "）");
+            RefreshTrayThresholdRow();                                             // 阈值行跟随切换
             if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);   // 托盘立刻重画
         }
 
-        private void OnTrayThresholdLeave(object sender, EventArgs e)
+        /// <summary>三个数字框任一改变：自动把后面的格子顺推成严格递增，再保存。</summary>
+        private void OnTrayThresholdValueChanged(object sender, EventArgs e)
         {
             if (_trayUiSync) return;
-            TextBox box = sender as TextBox;
-            if (box == null) return;
-            string kind = box.Tag as string;
-            string reason;
-            if (!TrayIcon.SaveThresholds(kind, box.Text, out reason))
+            string kind = TrayIcon.Kind;
+            if (kind == "none") return;
+
+            // 顺推：保证 t1 < t2 < t3（改哪一格都不会出现"顺序错误"弹窗）
+            _trayUiSync = true;
+            bool pushed = false;
+            try
             {
-                _lblTrayHint.Text = "阈值没保存：" + reason + " → 已还原为 " + TrayIcon.ThresholdText(kind);
-                box.Text = TrayIcon.ThresholdText(kind);
+                for (int i = 1; i < 3; i++)
+                {
+                    if (_numTrayTh[i].Value <= _numTrayTh[i - 1].Value)
+                    {
+                        decimal v = _numTrayTh[i - 1].Value + _numTrayTh[i].Increment;
+                        if (v > _numTrayTh[i].Maximum) v = _numTrayTh[i].Maximum;
+                        if (v != _numTrayTh[i].Value) { _numTrayTh[i].Value = v; pushed = true; }
+                    }
+                }
+            }
+            finally { _trayUiSync = false; }
+
+            double a = (double)_numTrayTh[0].Value, b = (double)_numTrayTh[1].Value, c = (double)_numTrayTh[2].Value;
+            string reason;
+            if (!TrayIcon.SaveThresholds(kind, Fmt(a) + "," + Fmt(b) + "," + Fmt(c), out reason))
+            {
+                _lblTrayHint.ForeColor = Color.FromArgb(176, 36, 36);
+                _lblTrayHint.Text = "没保存：" + reason;
                 return;
             }
-            _lblTrayHint.Text = "阈值已保存：" + (kind == "cput" ? "温度" : (kind == "cpup" ? "功耗" : "负载"))
-                + " = " + TrayIcon.ThresholdText(kind) + "（图标下次刷新即生效）";
+            RefreshTrayThresholdHint();
             if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);
             RefreshTrayPreview();
+            if (pushed) Log.Info("托盘图标：阈值自动顺推为 " + Fmt(a) + "," + Fmt(b) + "," + Fmt(c));
         }
 
-        private void SyncTrayThresholds()
+        /// <summary>阈值行跟着图标数据源走：只显示当前指标的那三格；图标=无 时整行隐藏。</summary>
+        private void RefreshTrayThresholdRow()
         {
-            for (int i = 0; i < 3; i++) _txtTrayTh[i].Text = TrayIcon.ThresholdText(TrayIcon.Kinds[i + 1]);
+            string kind = TrayIcon.Kind;
+            bool none = kind == "none";
+            _lblTrayTh.Visible = !none;
+            for (int i = 0; i < 3; i++) _numTrayTh[i].Visible = !none;
+
+            if (none)
+            {
+                _lblTrayHint.ForeColor = Color.FromArgb(110, 110, 116);
+                _lblTrayHint.Text = "图标显示选「无」时不使用阈值。";
+                return;
+            }
+
+            double[] th = TrayIcon.ThresholdsOf(kind);
+            _trayUiSync = true;
+            try
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    _numTrayTh[i].Minimum = kind == "cput" ? 20 : 1;
+                    _numTrayTh[i].Maximum = kind == "cput" ? 120 : (kind == "cpup" ? 150 : 100);
+                    _numTrayTh[i].Increment = 1;
+                    decimal v = (decimal)Math.Round(th[i]);
+                    if (v < _numTrayTh[i].Minimum) v = _numTrayTh[i].Minimum;
+                    if (v > _numTrayTh[i].Maximum) v = _numTrayTh[i].Maximum;
+                    _numTrayTh[i].Value = v;
+                }
+            }
+            finally { _trayUiSync = false; }
+            RefreshTrayThresholdHint();
+        }
+
+        /// <summary>只更新底部说明（不动三格数值，避免打断连续点箭头）。</summary>
+        private void RefreshTrayThresholdHint()
+        {
+            string kind = TrayIcon.Kind;
+            if (kind == "none") { _lblTrayHint.ForeColor = Color.FromArgb(110, 110, 116); _lblTrayHint.Text = "图标显示选「无」时不使用阈值。"; return; }
+            double[] th = TrayIcon.ThresholdsOf(kind);
+            string unit = kind == "cput" ? "℃" : (kind == "cpup" ? "W" : "%");
+            _lblTrayHint.ForeColor = Color.FromArgb(110, 110, 116);
+            _lblTrayHint.Text = TrayIcon.KindShort(kind) + "阈值（" + unit + "）：≤" + Fmt(th[0]) + " 绿 · ≤"
+                + Fmt(th[1]) + " 琥珀 · ≤" + Fmt(th[2]) + " 橙 · 更高红";
+        }
+
+        private static string Fmt(double d)
+        {
+            return d.ToString("0.##", CultureInfo.InvariantCulture);
         }
 
         private void OnTrayDefaultClick(object sender, EventArgs e)
@@ -2079,8 +2157,8 @@ namespace OpenMIFS
             TrayText.ResetDefault();
             TrayIcon.ResetThresholds();
             SyncTrayUi();
-            SyncTrayThresholds();
-            Log.Info("托盘提示：已恢复默认（版本 + 性能模式 + 风扇）");
+            RefreshTrayThresholdRow();
+            Log.Info("托盘提示：已恢复默认显示项（版本 + 性能模式 + 风扇）");
         }
 
         // ────────────────────────────────────────────────────── 传感器
@@ -3170,6 +3248,30 @@ namespace OpenMIFS
             return a[0].ToString("0.##", CultureInfo.InvariantCulture) + ","
                  + a[1].ToString("0.##", CultureInfo.InvariantCulture) + ","
                  + a[2].ToString("0.##", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>指标短名（界面标签用）。</summary>
+        public static string KindShort(string kind)
+        {
+            return kind == "cput" ? "温度" : (kind == "cpup" ? "功耗" : (kind == "cpul" ? "负载" : "—"));
+        }
+
+        /// <summary>把某个指标恢复成默认阈值。</summary>
+        public static void ResetThresholdFor(string kind)
+        {
+            if (kind == "cput") _tTemp = new double[] { DefaultTemp[0], DefaultTemp[1], DefaultTemp[2] };
+            else if (kind == "cpup") _tPower = new double[] { DefaultPower[0], DefaultPower[1], DefaultPower[2] };
+            else if (kind == "cpul") _tLoad = new double[] { DefaultLoad[0], DefaultLoad[1], DefaultLoad[2] };
+            else return;
+            try { Settings.Set(kind == "cput" ? "tray_icon_t" : (kind == "cpup" ? "tray_icon_p" : "tray_icon_l"), ThresholdText(kind)); }
+            catch (Exception ex) { Log.Ex("保存默认阈值失败", ex); }
+        }
+
+        /// <summary>取某个指标的当前阈值（副本，供界面生成动态说明）。</summary>
+        public static double[] ThresholdsOf(string kind)
+        {
+            double[] src = kind == "cput" ? _tTemp : (kind == "cpup" ? _tPower : _tLoad);
+            return new double[] { src[0], src[1], src[2] };
         }
 
         /// <summary>某个指标的当前阈值文本（界面显示用）。</summary>
