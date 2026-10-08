@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.6.0.0")]
-[assembly: AssemblyFileVersion("0.6.0.0")]
+[assembly: AssemblyVersion("0.6.1.0")]
+[assembly: AssemblyFileVersion("0.6.1.0")]
 
 namespace OpenMIFS
 {
@@ -1253,6 +1253,17 @@ namespace OpenMIFS
         private readonly NumericUpDown[] _numTrayTh = new NumericUpDown[] { new NumericUpDown(), new NumericUpDown(), new NumericUpDown() };
         private readonly FlatButton _btnSensorProbe = new FlatButton();
 
+        // ── 布局缩放与状态
+        private Panel _barLine;
+        private Panel _topLine;
+        private readonly Panel[] _clusterLines = new Panel[] { new Panel(), new Panel() };
+        private readonly Label[] _clusterLabels = new Label[] { new Label(), new Label(), new Label() };
+        private readonly Label _lblHintMode = new Label();
+        private SectionTitle _secMode, _secSw, _secKbd, _secFan, _secOsd;
+        private double _s = 1.0;          // 布局缩放系数（LayoutAll 计算）
+        private bool _layoutBusy;         // 防重入：改尺寸会触发 Resize
+        private bool _prefsOpen;
+
         // ── 右列：读数（凹陷面板；关键三项 + 三簇明细）
         private RecessedPanel _pnlReadout;
         private readonly BigReadout[] _big = new BigReadout[3];
@@ -1307,8 +1318,11 @@ namespace OpenMIFS
         public MainForm()
         {
             Text = "OpenMIFS v" + MifsApp.VersionText + " — 同方 MIFS 控制台";
-            ClientSize = new Size(940, 815);
-            MinimumSize = new Size(700, 560);
+            // 布局缩放由 LayoutAll() 自己算（见 Ui.F/Ui.S）；关掉 WinForms 的字体自动缩放，
+            // 否则 125%/150% DPI 下会被二次放大 → 中文下缘被截断、偏好设置撑出窗口。
+            AutoScaleMode = AutoScaleMode.None;
+            ClientSize = new Size(940, 860);
+            MinimumSize = new Size(720, 600);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.Sizable;   // 可拖动缩放：右列数据区跟着窗口变大
             MaximizeBox = true;
@@ -1318,6 +1332,13 @@ namespace OpenMIFS
             catch { }
 
             BuildUi();
+            // 自动刷新：默认开（用户可关，选择记进 settings.txt）
+            _chkAuto.Checked = Settings.Get("auto_refresh", "1") != "0";
+            _chkAuto.Click += delegate
+            {
+                Settings.Set("auto_refresh", _chkAuto.Checked ? "1" : "0");
+                Log.Info("自动刷新：" + (_chkAuto.Checked ? "开" : "关"));
+            };
             _timer.Interval = 3000;
             _timer.Tick += delegate { if (_chkAuto.Checked) RefreshAll(); };
             _timer.Start();
@@ -1338,11 +1359,12 @@ namespace OpenMIFS
             _osdWatch.Tick += delegate { CheckOsdWatch(); };
             _osdWatch.Start();
 
-            Shown += delegate { RefreshAll(); };
+            Shown += delegate { LayoutAll(); RefreshAll(); };
             // 注意：HideToTray/Restore 会改 ShowInTaskbar（触发句柄重建），从而再次引发 Resize。
             // 必须防重入，否则"最小化后收进托盘 → 点显示主界面"会无限互递归 → 栈溢出崩溃（0xC00000FD）。
             Resize += delegate
             {
+                LayoutAll();   // 窗口大小变了 → 整体重排（字号/间距/面板一起缩放）
                 if (_visibilityBusy) return;
                 if (WindowState == FormWindowState.Minimized) HideToTray();
             };
@@ -1552,47 +1574,22 @@ namespace OpenMIFS
         //  界面构建（v0.6.0「仪表台」三区布局，见 docs/UI-DESIGN.md §2）
         //  左列控制（平面）/ 右列读数（凹陷）/ 顶部状态条 / 底部状态行
         // ═══════════════════════════════════════════════════════════════
-        private SectionTitle AddTitle(string text, ref int y)
+        // ═══════════════════════════════════════════════════════════════
+        //  界面：控件创建（BuildUi / BuildPrefsUi）+ 几何重排（LayoutAll）
+        //  几何全部按"设计单位 × 缩放系数 s"计算，s 由窗口大小决定：
+        //  拖大/拖小窗口时字号、行高、面板一起缩放（AutoScaleMode=None，不吃 WinForms 的二次缩放）
+        // ═══════════════════════════════════════════════════════════════
+        private SectionTitle NewTitle(string text)
         {
             SectionTitle s = new SectionTitle();
             s.Text = text;
-            s.Location = new Point(Ui.Pad, y);
-            s.Size = new Size(Ui.LeftW, 26);
             Controls.Add(s);
-            y += 30;
             return s;
         }
 
-        private void AddNote(Label l, string text, ref int y)
-        {
-            l.AutoSize = false;
-            l.Text = text;
-            l.Font = Ui.FontSmall;
-            l.ForeColor = Ui.Label;
-            l.TextAlign = ContentAlignment.MiddleLeft;
-            l.Location = new Point(Ui.Pad, y);
-            l.Size = new Size(Ui.LeftW, 16);
-            Controls.Add(l);
-            y += 24;
-        }
-
-        private void AddButton(FlatButton b, string text, int x, int y, int w, EventHandler onClick, int tab)
-        {
-            b.Text = text;
-            b.Location = new Point(x, y);
-            b.Size = new Size(w, Ui.CtrlH);
-            b.TabIndex = tab;
-            b.AccessibleName = text;
-            if (onClick != null) b.Click += onClick;
-            Controls.Add(b);
-        }
-
-        private void AddCheck(CheckBox c, string text, int x, int y, int w, EventHandler onClick, int tab)
+        private void WireCheck(CheckBox c, string text, EventHandler onClick, int tab)
         {
             c.Text = text;
-            c.Location = new Point(x, y);
-            c.Size = new Size(w, 22);
-            c.Font = Ui.FontUi;
             c.ForeColor = Ui.Ink;
             c.FlatStyle = FlatStyle.System;
             c.TabIndex = tab;
@@ -1609,167 +1606,133 @@ namespace OpenMIFS
             // ── 顶部状态条
             _lblBrand.AutoSize = false;
             _lblBrand.Text = "OpenMIFS";
-            _lblBrand.Font = Ui.FontTitle;
-            _lblBrand.ForeColor = Ui.Ink;
-            _lblBrand.Location = new Point(14, 11);
-            _lblBrand.Size = new Size(92, 18);
+            _lblBrand.TextAlign = ContentAlignment.MiddleLeft;
             Controls.Add(_lblBrand);
 
             Label[] badges = new Label[] { _lblBadgeMode, _lblBadgeAc, _lblBadgeOsd };
-            int[] badgeW = new int[] { 70, 104, 150 };
-            int bx = 96;
             for (int i = 0; i < badges.Length; i++)
             {
                 badges[i].AutoSize = false;
-                badges[i].Font = Ui.FontUi;
-                badges[i].ForeColor = Ui.Ink;
                 badges[i].TextAlign = ContentAlignment.MiddleLeft;
-                badges[i].Location = new Point(bx, 11);
-                badges[i].Size = new Size(badgeW[i], 18);
                 Controls.Add(badges[i]);
-                bx += badgeW[i] + 12;
             }
 
             _lblClock.AutoSize = false;
-            _lblClock.Font = Ui.FontSmall;
-            _lblClock.ForeColor = Ui.Label;
             _lblClock.TextAlign = ContentAlignment.MiddleRight;
-            _lblClock.Location = new Point(ClientSize.Width - 348, 12);
-            _lblClock.Size = new Size(80, 18);
-            _lblClock.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             Controls.Add(_lblClock);
 
             _btnRefreshNow.Text = "立即刷新";
-            _btnRefreshNow.Size = new Size(94, 26);
-            _btnRefreshNow.Location = new Point(ClientSize.Width - 106, 7);
-            _btnRefreshNow.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            _btnRefreshNow.TabIndex = 1;
             _btnRefreshNow.AccessibleName = "立即刷新";
             _btnRefreshNow.Click += delegate { Log.Info("手动刷新"); RefreshAll(); };
             Controls.Add(_btnRefreshNow);
 
             _btnElevate.Text = "以管理员重启";
-            _btnElevate.Size = new Size(112, 26);
-            _btnElevate.Location = new Point(ClientSize.Width - 226, 7);
-            _btnElevate.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            _btnElevate.TabIndex = 2;
             _btnElevate.AccessibleName = "以管理员身份重启";
             _btnElevate.Visible = false;
             _btnElevate.Click += OnElevateClick;
             Controls.Add(_btnElevate);
 
-            Panel barLine = Ui.Hairline_(0, Ui.StatusBarH - 1, ClientSize.Width, this);
-            barLine.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _barLine = new Panel();
+            _barLine.BackColor = Ui.Hairline;
+            Controls.Add(_barLine);
 
             // ── 左列：控制
-            int y = 52;
-            AddTitle("性能模式", ref y);
+            _secMode = NewTitle("性能模式");
+            _secSw = NewTitle("硬件开关");
+            _secKbd = NewTitle("键盘背光");
+            _secFan = NewTitle("风扇");
+            _secOsd = NewTitle("OSD 与启动");
+
             for (int i = 0; i < ModeMap.Order.Length; i++)
             {
                 FlatButton b = new FlatButton();
-                AddButton(b, ModeMap.Order[i], Ui.Pad + i * 152, y, 144, OnModeClick, 10 + i);
                 b.Tag = ModeMap.Order[i];
+                b.TabIndex = 10 + i;
+                b.AccessibleName = "性能模式：" + ModeMap.Order[i];
+                b.Click += OnModeClick;
+                Controls.Add(b);
                 _btnMode[i] = b;
             }
-            y += Ui.CtrlH + 4;
-            AddNote(_lblModeNote, "检测中…", ref y);
 
-            AddTitle("硬件开关", ref y);
-            AddCheck(_chkFn, "Fn 锁", Ui.Pad, y + 2, 150, OnFnLockClick, 20);
-            AddCheck(_chkTp, "触控板锁定", 200, y + 2, 200, OnTpLockClick, 21);
-            y += 30;
+            WireCheck(_chkFn, "Fn 锁", OnFnLockClick, 20);
+            WireCheck(_chkTp, "触控板锁定", OnTpLockClick, 21);
 
-            AddTitle("键盘背光", ref y);
             for (int i = 0; i < 4; i++)
             {
                 FlatButton b = new FlatButton();
-                AddButton(b, i.ToString(CultureInfo.InvariantCulture), Ui.Pad + i * 76, y, 62, OnKbdClick, 22 + i);
                 b.Tag = i;
+                b.TabIndex = 22 + i;
+                b.AccessibleName = "键盘背光等级 " + i.ToString(CultureInfo.InvariantCulture);
+                b.Click += OnKbdClick;
+                Controls.Add(b);
                 _btnKbd[i] = b;
             }
-            y += Ui.CtrlH + 4;
-            AddNote(_lblKbdNote, "", ref y);
 
-            AddTitle("风扇", ref y);
-            AddButton(_btnBoost, "风扇满速", Ui.Pad, y, 240, OnFanBoostClick, 30);
-            y += Ui.CtrlH + 4;
-            AddNote(_lblBoostNote, "", ref y);
+            _btnBoost.Text = "风扇满速";
+            _btnBoost.TabIndex = 30;
+            _btnBoost.AccessibleName = "风扇满速开关";
+            _btnBoost.Click += OnFanBoostClick;
+            Controls.Add(_btnBoost);
 
-            AddTitle("OSD 与启动", ref y);
-            Label lblHintMode = new Label();
-            lblHintMode.AutoSize = false;
-            lblHintMode.Text = "屏幕提示";
-            lblHintMode.Font = Ui.FontSmall;
-            lblHintMode.ForeColor = Ui.Label;
-            lblHintMode.TextAlign = ContentAlignment.MiddleLeft;
-            lblHintMode.Location = new Point(Ui.Pad, y + 3);
-            lblHintMode.Size = new Size(76, 18);
-            Controls.Add(lblHintMode);
+            Label[] notes = new Label[] { _lblModeNote, _lblKbdNote, _lblBoostNote, _lblDpi, _lblHintMode };
+            for (int i = 0; i < notes.Length; i++)
+            {
+                notes[i].AutoSize = false;
+                notes[i].TextAlign = ContentAlignment.MiddleLeft;
+                notes[i].ForeColor = Ui.Label;
+                Controls.Add(notes[i]);
+            }
+            _lblHintMode.Text = "屏幕提示";
+            _lblModeNote.Text = "检测中…";
+            _lblSensorHint.AutoSize = false;
+            _lblSensorHint.TextAlign = ContentAlignment.MiddleLeft;
+            _lblSensorHint.ForeColor = Ui.Label;
+            Controls.Add(_lblSensorHint);
 
-            _cmbOsdHint.Location = new Point(Ui.Pad + 78, y);
-            _cmbOsdHint.Size = new Size(140, 22);
             _cmbOsdHint.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cmbOsdHint.Font = Ui.FontUi;
             _cmbOsdHint.TabIndex = 40;
             _cmbOsdHint.AccessibleName = "自带屏幕提示模式";
             _cmbOsdHint.Items.AddRange(new object[] { "自动（不重复）", "总是显示", "关闭" });
             _cmbOsdHint.SelectedIndex = 0;
             _cmbOsdHint.SelectedIndexChanged += OnOsdHintModeChanged;
             Controls.Add(_cmbOsdHint);
-            y += 30;
 
-            AddButton(_btnOsdRestart, "重启 OSD", Ui.Pad, y, 104, OnOsdRestartClick, 41);
-            AddButton(_btnOsdDiag, "诊断 OSD", 124, y, 104, OnOsdDiagClick, 42);
-            AddButton(_btnOsdDir, "打开目录", 236, y, 104, OnOpenOsdDirClick, 43);
-            AddButton(_btnRecap, "重测功能", 348, y, 104, OnRecapClick, 44);
-            y += Ui.CtrlH + 4;
+            FlatButton[] osdBtns = new FlatButton[] { _btnOsdRestart, _btnOsdDiag, _btnOsdDir, _btnRecap };
+            string[] osdText = new string[] { "重启 OSD", "诊断 OSD", "打开目录", "重测功能" };
+            EventHandler[] osdHandlers = new EventHandler[] { OnOsdRestartClick, OnOsdDiagClick, OnOpenOsdDirClick, OnRecapClick };
+            for (int i = 0; i < osdBtns.Length; i++)
+            {
+                osdBtns[i].Text = osdText[i];
+                osdBtns[i].AccessibleName = osdText[i];
+                osdBtns[i].TabIndex = 41 + i;
+                osdBtns[i].Click += osdHandlers[i];
+                Controls.Add(osdBtns[i]);
+            }
 
-            AddCheck(_chkStartup, "开机自启（登录时静默进托盘）", Ui.Pad, y + 2, 300, OnStartupClick, 45);
-            y += 30;
-            AddCheck(_chkDpi, "DPI 兼容修复（实验，可撤销）", Ui.Pad, y + 2, 240, OnDpiFixClick, 46);
-            _lblDpi.AutoSize = false;
-            _lblDpi.Font = Ui.FontSmall;
-            _lblDpi.ForeColor = Ui.Label;
-            _lblDpi.TextAlign = ContentAlignment.MiddleLeft;
-            _lblDpi.Location = new Point(258, y + 3);
-            _lblDpi.Size = new Size(190, 18);
-            Controls.Add(_lblDpi);
-            y += 34;
+            WireCheck(_chkStartup, "开机自启（登录时静默进托盘）", OnStartupClick, 45);
+            WireCheck(_chkDpi, "DPI 兼容修复（实验，可撤销）", OnDpiFixClick, 46);
 
-            // ── 左列底部：偏好设置（默认折叠）
             _btnPrefs.Text = "\u25B8 偏好设置";
-            _btnPrefs.Location = new Point(Ui.Pad, y);
-            _btnPrefs.Size = new Size(Ui.LeftW, Ui.CtrlH);
             _btnPrefs.TabIndex = 60;
             _btnPrefs.AccessibleName = "展开或收起偏好设置";
             _btnPrefs.Click += delegate { TogglePrefs(); };
             Controls.Add(_btnPrefs);
 
-            _pnlPrefs.Location = new Point(Ui.Pad, y + Ui.CtrlH + 4);
-            _pnlPrefs.Size = new Size(Ui.LeftW, 250);
             _pnlPrefs.BackColor = Ui.Surface;
-            _pnlPrefs.Visible = false;
+            _pnlPrefs.AutoScroll = true;
             Controls.Add(_pnlPrefs);
             BuildPrefsUi();
 
-            // ── 右列：读数面板（凹陷方角）
-            int rx = Ui.LeftW + 24;
+            // ── 右列：读数面板（凹陷方角 = 只读）
             _pnlReadout = new RecessedPanel();
-            _pnlReadout.Location = new Point(rx, 52);
-            _pnlReadout.Size = new Size(ClientSize.Width - rx - 12, ClientSize.Height - 52 - 46);
-            _pnlReadout.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             Controls.Add(_pnlReadout);
             _tips.SetToolTip(_pnlReadout, "只读读数区：窗口可拖动缩放，这里会跟着变大。");
 
-            int innerW = _pnlReadout.Width - Ui.Pad * 2 - 4;
-            int colW = innerW / 3;
-            _big[0] = new BigReadout(_pnlReadout, Ui.Pad, 18, colW);
-            _big[1] = new BigReadout(_pnlReadout, Ui.Pad + colW, 18, colW);
-            _big[2] = new BigReadout(_pnlReadout, Ui.Pad + colW * 2, 18, colW);
+            for (int i = 0; i < 3; i++) _big[i] = new BigReadout(_pnlReadout);
 
-            int ry = 74;
-            Ui.Hairline_(Ui.Pad, ry, innerW, _pnlReadout);
-            ry += 10;
+            _topLine = new Panel();
+            _topLine.BackColor = Ui.Hairline;
+            _pnlReadout.Controls.Add(_topLine);
 
             string[] cluster = new string[] { "热与功耗", "频率与负载", "存储与电池" };
             string[][] clusterRows = new string[][]
@@ -1780,87 +1743,57 @@ namespace OpenMIFS
             };
             for (int c = 0; c < cluster.Length; c++)
             {
-                if (c > 0) { Ui.Hairline_(Ui.Pad, ry, innerW, _pnlReadout); ry += 10; }
-                Label ct = new Label();
-                ct.AutoSize = false;
-                ct.Text = cluster[c];
-                ct.Font = Ui.FontSmall;
-                ct.ForeColor = Ui.Label;
-                ct.BackColor = Color.Transparent;
-                ct.TextAlign = ContentAlignment.MiddleLeft;
-                ct.Location = new Point(Ui.Pad, ry);
-                ct.Size = new Size(innerW, 16);
-                _pnlReadout.Controls.Add(ct);
-                ry += 18;
+                _clusterLabels[c].AutoSize = false;
+                _clusterLabels[c].Text = cluster[c];
+                _clusterLabels[c].ForeColor = Ui.Label;
+                _clusterLabels[c].BackColor = Color.Transparent;
+                _clusterLabels[c].TextAlign = ContentAlignment.MiddleLeft;
+                _pnlReadout.Controls.Add(_clusterLabels[c]);
+                if (c > 0)
+                {
+                    _clusterLines[c - 1].BackColor = Ui.Hairline;
+                    _pnlReadout.Controls.Add(_clusterLines[c - 1]);
+                }
                 for (int r = 0; r < clusterRows[c].Length; r++)
                 {
-                    ReadoutRow row = new ReadoutRow(_pnlReadout, ry, clusterRows[c][r], innerW + 4);
-                    _rows.Add(row);
+                    _rows.Add(new ReadoutRow(_pnlReadout, clusterRows[c][r]));
                     _rowNames.Add(clusterRows[c][r]);
-                    ry += Ui.RowH;
                 }
             }
 
             _lblEnv.AutoSize = false;
-            _lblEnv.Font = Ui.FontSmall;
-            _lblEnv.ForeColor = Ui.Label;
             _lblEnv.BackColor = Color.Transparent;
+            _lblEnv.ForeColor = Ui.Label;
             _lblEnv.TextAlign = ContentAlignment.MiddleLeft;
-            _lblEnv.Location = new Point(Ui.Pad, ry + 6);
-            _lblEnv.Size = new Size(innerW, 18);
-            _lblEnv.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
             _pnlReadout.Controls.Add(_lblEnv);
 
             _lblUnavail.AutoSize = false;
-            _lblUnavail.Font = Ui.FontSmall;
-            _lblUnavail.ForeColor = Ui.Muted;
             _lblUnavail.BackColor = Color.Transparent;
+            _lblUnavail.ForeColor = Ui.Muted;
             _lblUnavail.TextAlign = ContentAlignment.MiddleLeft;
-            _lblUnavail.Location = new Point(Ui.Pad, ry + 28);
-            _lblUnavail.Size = new Size(innerW, 18);
-            _lblUnavail.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
             _pnlReadout.Controls.Add(_lblUnavail);
 
-            // ── 底部状态行（自动刷新 + 读数状态；刷新动作已并入状态条，N12）
-            int fy = ClientSize.Height - 32;
+            // ── 底部状态行（自动刷新 + 读数提示；刷新动作在状态条右侧）
             _chkAuto.Text = "自动刷新";
-            _chkAuto.Location = new Point(14, fy);
-            _chkAuto.Size = new Size(92, 22);
-            _chkAuto.Font = Ui.FontUi;
             _chkAuto.ForeColor = Ui.Ink;
             _chkAuto.FlatStyle = FlatStyle.System;
             _chkAuto.TabIndex = 70;
             _chkAuto.AccessibleName = "自动刷新开关";
             Controls.Add(_chkAuto);
 
-            _cmbInterval.Location = new Point(110, fy - 1);
-            _cmbInterval.Size = new Size(66, 22);
             _cmbInterval.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cmbInterval.Font = Ui.FontUi;
             _cmbInterval.TabIndex = 71;
             _cmbInterval.AccessibleName = "自动刷新间隔";
             _cmbInterval.Items.AddRange(new object[] { "2 秒", "3 秒", "5 秒", "10 秒" });
             _cmbInterval.SelectedIndex = 1;
             _cmbInterval.SelectedIndexChanged += OnIntervalChanged;
             Controls.Add(_cmbInterval);
-
-            _lblSensorHint.AutoSize = false;
-            _lblSensorHint.Font = Ui.FontSmall;
-            _lblSensorHint.ForeColor = Ui.Label;
-            _lblSensorHint.TextAlign = ContentAlignment.MiddleLeft;
-            _lblSensorHint.Location = new Point(188, fy + 1);
-            _lblSensorHint.Size = new Size(ClientSize.Width - 204, 18);
-            _lblSensorHint.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
-            Controls.Add(_lblSensorHint);
         }
 
         /// <summary>偏好设置区（折叠内容）：托盘提示 + 图标阈值 + 数据源探测。</summary>
         private void BuildPrefsUi()
         {
             _lstTray.CheckOnClick = true;
-            _lstTray.Location = new Point(0, 0);
-            _lstTray.Size = new Size(196, 172);
-            _lstTray.Font = Ui.FontUi;
             _lstTray.IntegralHeight = false;
             _lstTray.TabIndex = 61;
             _lstTray.AccessibleName = "托盘悬停提示包含的项目";
@@ -1871,9 +1804,6 @@ namespace OpenMIFS
                 + "悬停提示最多 62 字符：勾到上限后，再加项会被拒绝 —— 先取消一项再勾。");
 
             _lblTrayPreview.AutoSize = false;
-            _lblTrayPreview.Location = new Point(204, 0);
-            _lblTrayPreview.Size = new Size(228, 100);
-            _lblTrayPreview.Font = Ui.FontSmall;
             _lblTrayPreview.BackColor = Ui.Recessed;
             _lblTrayPreview.ForeColor = Ui.Ink;
             _lblTrayPreview.BorderStyle = BorderStyle.FixedSingle;
@@ -1881,33 +1811,23 @@ namespace OpenMIFS
             _pnlPrefs.Controls.Add(_lblTrayPreview);
 
             _lblTrayBudget.AutoSize = false;
-            _lblTrayBudget.Location = new Point(204, 104);
-            _lblTrayBudget.Size = new Size(228, 16);
-            _lblTrayBudget.Font = Ui.FontSmall;
             _lblTrayBudget.ForeColor = Ui.Label;
+            _lblTrayBudget.TextAlign = ContentAlignment.MiddleLeft;
             _pnlPrefs.Controls.Add(_lblTrayBudget);
 
             _btnTrayDefault.Text = "恢复默认";
-            _btnTrayDefault.Location = new Point(204, 124);
-            _btnTrayDefault.Size = new Size(104, 26);
             _btnTrayDefault.TabIndex = 62;
             _btnTrayDefault.AccessibleName = "恢复默认提示项";
             _btnTrayDefault.Click += OnTrayDefaultClick;
             _pnlPrefs.Controls.Add(_btnTrayDefault);
 
             _lblTrayIcon.AutoSize = false;
-            _lblTrayIcon.Location = new Point(0, 182);
-            _lblTrayIcon.Size = new Size(72, 18);
-            _lblTrayIcon.Font = Ui.FontSmall;
-            _lblTrayIcon.ForeColor = Ui.Label;
             _lblTrayIcon.Text = "图标显示";
+            _lblTrayIcon.ForeColor = Ui.Label;
             _lblTrayIcon.TextAlign = ContentAlignment.MiddleLeft;
             _pnlPrefs.Controls.Add(_lblTrayIcon);
 
             _cmbTrayIcon.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cmbTrayIcon.Location = new Point(76, 180);
-            _cmbTrayIcon.Size = new Size(140, 22);
-            _cmbTrayIcon.Font = Ui.FontUi;
             _cmbTrayIcon.TabIndex = 63;
             _cmbTrayIcon.AccessibleName = "托盘图标显示内容";
             for (int i = 0; i < TrayIcon.Kinds.Length; i++) _cmbTrayIcon.Items.Add(TrayIcon.KindLabels[i]);
@@ -1916,19 +1836,13 @@ namespace OpenMIFS
             _pnlPrefs.Controls.Add(_cmbTrayIcon);
 
             _lblTrayTh.AutoSize = false;
-            _lblTrayTh.Location = new Point(228, 182);
-            _lblTrayTh.Size = new Size(68, 18);
-            _lblTrayTh.Font = Ui.FontSmall;
-            _lblTrayTh.ForeColor = Ui.Label;
             _lblTrayTh.Text = "变色阈值";
+            _lblTrayTh.ForeColor = Ui.Label;
             _lblTrayTh.TextAlign = ContentAlignment.MiddleLeft;
             _pnlPrefs.Controls.Add(_lblTrayTh);
 
             for (int i = 0; i < 3; i++)
             {
-                _numTrayTh[i].Location = new Point(300 + i * 50, 180);
-                _numTrayTh[i].Size = new Size(46, 22);
-                _numTrayTh[i].Font = Ui.FontUi;
                 _numTrayTh[i].DecimalPlaces = 0;
                 _numTrayTh[i].TextAlign = HorizontalAlignment.Right;
                 _numTrayTh[i].TabIndex = 64 + i;
@@ -1938,27 +1852,219 @@ namespace OpenMIFS
             }
 
             _lblTrayHint.AutoSize = false;
-            _lblTrayHint.Location = new Point(0, 212);
-            _lblTrayHint.Size = new Size(432, 16);
-            _lblTrayHint.Font = Ui.FontSmall;
             _lblTrayHint.ForeColor = Ui.Label;
+            _lblTrayHint.TextAlign = ContentAlignment.MiddleLeft;
             _pnlPrefs.Controls.Add(_lblTrayHint);
 
             _btnSensorProbe.Text = "探测数据源";
-            _btnSensorProbe.Location = new Point(0, 232);
-            _btnSensorProbe.Size = new Size(104, 26);
             _btnSensorProbe.TabIndex = 68;
             _btnSensorProbe.AccessibleName = "探测传感器数据源";
             _btnSensorProbe.Click += OnSensorProbeClick;
             _pnlPrefs.Controls.Add(_btnSensorProbe);
         }
 
+        // ────────────────────────────────────────────────────── 几何重排
+        /// <summary>按窗口大小重排全部控件。Resize / Shown / 折叠切换时调用。</summary>
+        private void LayoutAll()
+        {
+            if (_layoutBusy || _pnlReadout == null) return;
+            _layoutBusy = true;
+            try
+            {
+                int W = ClientSize.Width, H = ClientSize.Height;
+                double s = Math.Min(W / 940.0, H / 860.0);      // 设计画布 940×860
+                if (s < 0.78) s = 0.78;
+                if (s > 2.20) s = 2.20;
+                _s = s;
+
+                Font fUi = Ui.F(9F, false, false, s), fBold = Ui.F(9F, true, false, s), f8 = Ui.F(8F, false, false, s);
+                Font fVal = Ui.F(11F, true, true, s), fBig = Ui.F(17F, true, true, s);
+                int X = Ui.S(12, s), leftW = Ui.S(Ui.LeftW, s), pad = Ui.S(Ui.Pad, s), gap = Ui.S(Ui.Gap, s);
+                int ctrlH = Ui.S(Ui.CtrlH, s), rowH = Ui.S(Ui.RowH, s), h8 = Ui.TextH(f8, s);
+                int topY = Ui.S(52, s), bottomY = H - Ui.S(32, s);
+
+                // ── 顶部状态条
+                _lblBrand.Font = fBold;
+                _lblBrand.Location = new Point(X, Ui.S(8, s));
+                _lblBrand.Size = new Size(Ui.S(92, s), Ui.S(24, s));
+                Label[] badges = new Label[] { _lblBadgeMode, _lblBadgeAc, _lblBadgeOsd };
+                int[] bw = new int[] { Ui.S(72, s), Ui.S(112, s), Ui.S(170, s) };
+                int bx = X + Ui.S(86, s);
+                for (int i = 0; i < badges.Length; i++)
+                {
+                    badges[i].Font = fUi;
+                    badges[i].Location = new Point(bx, Ui.S(8, s));
+                    badges[i].Size = new Size(bw[i], Ui.S(24, s));
+                    bx += bw[i] + gap;
+                }
+                _btnRefreshNow.Font = fUi;
+                _btnRefreshNow.Size = new Size(Ui.S(94, s), Ui.S(26, s));
+                _btnRefreshNow.Location = new Point(W - Ui.S(106, s), Ui.S(7, s));
+                _btnElevate.Font = fUi;
+                _btnElevate.Size = new Size(Ui.S(112, s), Ui.S(26, s));
+                _btnElevate.Location = new Point(W - Ui.S(226, s), Ui.S(7, s));
+                _lblClock.Font = f8;
+                _lblClock.Location = new Point(W - Ui.S(348, s), Ui.S(11, s));
+                _lblClock.Size = new Size(Ui.S(80, s), h8);
+                _barLine.Location = new Point(0, Ui.S(Ui.StatusBarH, s) - 1);
+                _barLine.Size = new Size(W, 1);
+
+                // ── 底部状态行：永远贴窗口底（偏好设置展开也不会压住它）
+                _chkAuto.Font = fUi;
+                _chkAuto.Location = new Point(X, bottomY);
+                _chkAuto.Size = new Size(Ui.S(92, s), Ui.S(22, s));
+                _cmbInterval.Font = fUi;
+                _cmbInterval.Location = new Point(X + Ui.S(96, s), bottomY - Ui.S(1, s));
+                _cmbInterval.Size = new Size(Ui.S(70, s), Ui.S(22, s));
+                _lblSensorHint.Font = f8;
+                _lblSensorHint.Location = new Point(X + Ui.S(176, s), bottomY + Ui.S(2, s));
+                _lblSensorHint.Size = new Size(W - X - Ui.S(188, s), h8);
+
+                // ── 左列
+                int y = topY;
+                y = LayoutTitle(_secMode, X, leftW, y, s, fBold);
+                int segW = (leftW - gap * 2) / 3;
+                for (int i = 0; i < _btnMode.Length; i++) Place(_btnMode[i], X + i * (segW + gap), y, segW, ctrlH, fUi);
+                y += ctrlH + Ui.S(4, s);
+                y = LayoutNote(_lblModeNote, X, leftW, y, s, f8);
+
+                y = LayoutTitle(_secSw, X, leftW, y, s, fBold);
+                Place(_chkFn, X, y + Ui.S(2, s), Ui.S(150, s), Ui.S(22, s), fUi);
+                Place(_chkTp, X + Ui.S(160, s), y + Ui.S(2, s), Ui.S(210, s), Ui.S(22, s), fUi);
+                y += Ui.S(30, s);
+
+                y = LayoutTitle(_secKbd, X, leftW, y, s, fBold);
+                int kw = Ui.S(62, s), kg = Ui.S(14, s);
+                for (int i = 0; i < _btnKbd.Length; i++) Place(_btnKbd[i], X + i * (kw + kg), y, kw, ctrlH, fUi);
+                y += ctrlH + Ui.S(4, s);
+                y = LayoutNote(_lblKbdNote, X, leftW, y, s, f8);
+
+                y = LayoutTitle(_secFan, X, leftW, y, s, fBold);
+                Place(_btnBoost, X, y, Ui.S(240, s), ctrlH, fUi);
+                y += ctrlH + Ui.S(4, s);
+                y = LayoutNote(_lblBoostNote, X, leftW, y, s, f8);
+
+                y = LayoutTitle(_secOsd, X, leftW, y, s, fBold);
+                Place(_lblHintMode, X, y + Ui.S(3, s), Ui.S(76, s), h8, f8);
+                Place(_cmbOsdHint, X + Ui.S(78, s), y, Ui.S(140, s), Ui.S(24, s), fUi);
+                y += Ui.S(30, s);
+                int ow = (leftW - gap * 3) / 4;
+                FlatButton[] ob = new FlatButton[] { _btnOsdRestart, _btnOsdDiag, _btnOsdDir, _btnRecap };
+                for (int i = 0; i < ob.Length; i++) Place(ob[i], X + i * (ow + gap), y, ow, ctrlH, fUi);
+                y += ctrlH + Ui.S(4, s);
+                Place(_chkStartup, X, y + Ui.S(2, s), Ui.S(300, s), Ui.S(22, s), fUi);
+                y += Ui.S(30, s);
+                Place(_chkDpi, X, y + Ui.S(2, s), Ui.S(250, s), Ui.S(22, s), fUi);
+                Place(_lblDpi, X + Ui.S(256, s), y + Ui.S(3, s), leftW - Ui.S(256, s), h8, f8);
+                y += Ui.S(32, s);
+
+                // ── 偏好设置：面板高度自动收在底部状态行之上；内容放不下就内部滚动
+                Place(_btnPrefs, X, y, leftW, ctrlH, fUi);
+                y += ctrlH + Ui.S(4, s);
+                int prefsH = Ui.S(252, s);
+                int room = bottomY - y - gap;
+                if (prefsH > room) prefsH = room;
+                if (prefsH < Ui.S(80, s)) prefsH = Ui.S(80, s);
+                _pnlPrefs.Location = new Point(X, y);
+                _pnlPrefs.Size = new Size(leftW, prefsH);
+                _pnlPrefs.Visible = _prefsOpen;
+                LayoutPrefs(s);
+
+                // ── 右列：读数面板
+                int rx = X + leftW + Ui.S(12, s);
+                int rw = W - rx - X;
+                if (rw < Ui.S(240, s)) rw = Ui.S(240, s);
+                int rh = bottomY - topY - Ui.S(8, s);
+                _pnlReadout.Location = new Point(rx, topY);
+                _pnlReadout.Size = new Size(rw, rh);
+                _pnlReadout.Padding = new Padding(pad);
+
+                int innerW = rw - pad * 2 - 4;
+                int colW = innerW / 3;
+                int by = pad + Ui.S(4, s);
+                for (int i = 0; i < 3; i++) _big[i].Layout(pad + i * colW, by, colW, s, fBig, fUi, f8);
+
+                int ry = by + fBig.Height + Ui.S(30, s);
+                _topLine.Location = new Point(pad, ry);
+                _topLine.Size = new Size(innerW, 1);
+                ry += Ui.S(10, s);
+
+                int[] rowStart = new int[] { 0, 2, 7 };
+                int[] rowCount = new int[] { 2, 5, 5 };
+                for (int c = 0; c < rowStart.Length; c++)
+                {
+                    if (c > 0)
+                    {
+                        _clusterLines[c - 1].Location = new Point(pad, ry);
+                        _clusterLines[c - 1].Size = new Size(innerW, 1);
+                        ry += Ui.S(10, s);
+                    }
+                    _clusterLabels[c].Font = f8;
+                    _clusterLabels[c].Location = new Point(pad, ry);
+                    _clusterLabels[c].Size = new Size(innerW, h8);
+                    ry += h8 + Ui.S(2, s);
+                    for (int r = 0; r < rowCount[c]; r++)
+                    {
+                        _rows[rowStart[c] + r].Layout(ry, innerW + 4, rowH, s, f8, fVal, f8);
+                        ry += rowH;
+                    }
+                }
+
+                Place(_lblEnv, pad, rh - pad - h8 * 2 - Ui.S(4, s), innerW, h8, f8);
+                Place(_lblUnavail, pad, rh - pad - h8, innerW, h8, f8);
+            }
+            finally { _layoutBusy = false; }
+        }
+
+        private int LayoutTitle(SectionTitle t, int x, int w, int y, double s, Font f)
+        {
+            t.Font = f;
+            t.Location = new Point(x, y);
+            t.Size = new Size(w, Ui.S(24, s));
+            return y + Ui.S(28, s);
+        }
+
+        private int LayoutNote(Label l, int x, int w, int y, double s, Font f)
+        {
+            int h = Ui.TextH(f, s);
+            l.Font = f;
+            l.Location = new Point(x, y);
+            l.Size = new Size(w, h);
+            return y + h + Ui.S(4, s);
+        }
+
+        private static void Place(Control c, int x, int y, int w, int h, Font f)
+        {
+            c.Font = f;
+            c.Location = new Point(x, y);
+            c.Size = new Size(w, h);
+        }
+
+        private void LayoutPrefs(double s)
+        {
+            Font fUi = Ui.F(9F, false, false, s), f8 = Ui.F(8F, false, false, s);
+            int h8 = Ui.TextH(f8, s);
+            int listW = Ui.S(196, s), listH = Ui.S(146, s), colX = listW + Ui.S(Ui.Gap, s);
+            Place(_lstTray, 0, 0, listW, listH, fUi);
+            Place(_lblTrayPreview, colX, 0, Ui.S(228, s), Ui.S(84, s), f8);
+            Place(_lblTrayBudget, colX, Ui.S(88, s), Ui.S(228, s), h8, f8);
+            Place(_btnTrayDefault, colX, Ui.S(110, s), Ui.S(104, s), Ui.S(26, s), fUi);
+            int rowY = listH + Ui.S(12, s);
+            Place(_lblTrayIcon, 0, rowY, Ui.S(72, s), h8, f8);
+            Place(_cmbTrayIcon, Ui.S(76, s), rowY - Ui.S(2, s), Ui.S(140, s), Ui.S(22, s), fUi);
+            Place(_lblTrayTh, Ui.S(222, s), rowY, Ui.S(68, s), h8, f8);
+            for (int i = 0; i < 3; i++)
+                Place(_numTrayTh[i], Ui.S(292, s) + i * Ui.S(50, s), rowY - Ui.S(2, s), Ui.S(46, s), Ui.S(22, s), fUi);
+            Place(_lblTrayHint, 0, rowY + h8 + Ui.S(6, s), Ui.S(432, s), h8, f8);
+            Place(_btnSensorProbe, 0, rowY + h8 * 2 + Ui.S(10, s), Ui.S(104, s), Ui.S(26, s), fUi);
+        }
         private void TogglePrefs()
         {
-            _pnlPrefs.Visible = !_pnlPrefs.Visible;
-            _btnPrefs.Text = (_pnlPrefs.Visible ? "\u25BE 偏好设置" : "\u25B8 偏好设置");
-            _btnPrefs.Selected = _pnlPrefs.Visible;
-            Log.Info("偏好设置：" + (_pnlPrefs.Visible ? "展开" : "收起"));
+            _prefsOpen = !_prefsOpen;
+            _btnPrefs.Text = (_prefsOpen ? "\u25BE 偏好设置" : "\u25B8 偏好设置");
+            _btnPrefs.Selected = _prefsOpen;
+            LayoutAll();
+            Log.Info("偏好设置：" + (_prefsOpen ? "展开" : "收起"));
         }
 
         /// <summary>未提权时的一键提权重启（状态条右侧）。</summary>

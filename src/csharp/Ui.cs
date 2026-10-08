@@ -38,6 +38,32 @@ namespace OpenMIFS
         public static readonly Color Hot = Color.FromArgb(0xB0, 0x4A, 0x18);
         public static readonly Color Scald = Color.FromArgb(0xA8, 0x24, 0x24);
 
+        // ── 缩放工具：布局全部按"设计单位 × s"计算，s 由窗口大小决定
+        private static readonly System.Collections.Generic.Dictionary<string, Font> _fontCache =
+            new System.Collections.Generic.Dictionary<string, Font>();
+
+        /// <summary>按缩放系数取字体（带缓存）。mono=true 用 Consolas（数值）。</summary>
+        public static Font F(float pt, bool bold, bool mono, double s)
+        {
+            float size = (float)(pt * s);
+            if (size < 5F) size = 5F;
+            if (size > 40F) size = 40F;
+            string key = (mono ? "m" : "y") + (bold ? "b" : "r") + size.ToString("0.##", CultureInfo.InvariantCulture);
+            Font f;
+            if (_fontCache.TryGetValue(key, out f)) return f;
+            string family = mono ? "Consolas" : "Microsoft YaHei UI";
+            try { f = new Font(family, size, bold ? FontStyle.Bold : FontStyle.Regular); }
+            catch { f = new Font(FontFamily.GenericSansSerif, size, bold ? FontStyle.Bold : FontStyle.Regular); }
+            _fontCache[key] = f;
+            return f;
+        }
+
+        /// <summary>设计单位 → 像素。</summary>
+        public static int S(double v, double s) { return (int)Math.Round(v * s); }
+
+        /// <summary>标签高度：按字体实际行高给，避免中文下缘被截断。</summary>
+        public static int TextH(Font f, double s) { return Math.Max(f.Height + S(2, s), S(14, s)); }
+
         // ── 字体（4 档，见 §1.3）
         public static readonly Font FontTitle = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
         public static readonly Font FontUi = new Font("Microsoft YaHei UI", 9F);
@@ -277,37 +303,44 @@ namespace OpenMIFS
         private readonly Label _val = new Label();
         private readonly Label _unit = new Label();
 
-        public ReadoutRow(Control host, int y, string key, int width)
+        public ReadoutRow(Control host, string key)
         {
             _key.AutoSize = false;
             _key.Text = key;
-            _key.Font = Ui.FontSmall;
             _key.ForeColor = Ui.Label;
             _key.BackColor = Color.Transparent;
             _key.TextAlign = ContentAlignment.MiddleRight;
-            _key.Location = new Point(0, y + 2);
-            _key.Size = new Size(Ui.LabelW, 18);
             host.Controls.Add(_key);
 
-            int valW = width - Ui.LabelW - Ui.Gap - Ui.UnitW;
-            if (valW < 40) valW = 40;
             _val.AutoSize = false;
-            _val.Font = Ui.FontValue;
             _val.ForeColor = Ui.Ink;
             _val.BackColor = Color.Transparent;
             _val.TextAlign = ContentAlignment.MiddleRight;
-            _val.Location = new Point(Ui.LabelW + Ui.Gap, y);
-            _val.Size = new Size(valW, Ui.RowH - 2);
             host.Controls.Add(_val);
 
             _unit.AutoSize = false;
-            _unit.Font = Ui.FontSmall;
             _unit.ForeColor = Ui.Label;
             _unit.BackColor = Color.Transparent;
             _unit.TextAlign = ContentAlignment.MiddleLeft;
-            _unit.Location = new Point(width - Ui.UnitW, y + 2);
-            _unit.Size = new Size(Ui.UnitW, 18);
             host.Controls.Add(_unit);
+        }
+
+        /// <summary>按当前缩放重排（Resize 时调用）。</summary>
+        public void Layout(int y, int rowW, int rowH, double s, Font keyFont, Font valFont, Font unitFont)
+        {
+            int labelW = Ui.S(Ui.LabelW, s), unitW = Ui.S(Ui.UnitW, s), gap = Ui.S(Ui.Gap, s);
+            int h = Ui.TextH(keyFont, s);
+            _key.Font = keyFont;
+            _key.Location = new Point(0, y + (rowH - h) / 2);
+            _key.Size = new Size(labelW, h);
+            int valW = rowW - labelW - gap - unitW;
+            if (valW < Ui.S(40, s)) valW = Ui.S(40, s);
+            _val.Font = valFont;
+            _val.Location = new Point(labelW + gap, y);
+            _val.Size = new Size(valW, rowH);
+            _unit.Font = unitFont;
+            _unit.Location = new Point(rowW - unitW, y + (rowH - h) / 2);
+            _unit.Size = new Size(unitW, h);
         }
 
         public Label ValueLabel { get { return _val; } }
@@ -336,37 +369,44 @@ namespace OpenMIFS
         private readonly Label _val = new Label();
         private readonly Label _unit = new Label();
         private readonly Label _cap = new Label();
-        private readonly int _x, _w;
+        private int _x, _w;
 
-        public BigReadout(Control host, int x, int y, int w)
+        public BigReadout(Control host)
         {
-            _x = x; _w = w;
             _val.AutoSize = false;
-            _val.Font = Ui.FontBig;
             _val.ForeColor = Ui.Ink;
             _val.BackColor = Color.Transparent;
             _val.TextAlign = ContentAlignment.BottomRight;
-            _val.Location = new Point(x, y);
-            _val.Size = new Size(w - 22, 30);
             host.Controls.Add(_val);
 
             _unit.AutoSize = false;
-            _unit.Font = Ui.FontUi;
             _unit.ForeColor = Ui.Label;
             _unit.BackColor = Color.Transparent;
             _unit.TextAlign = ContentAlignment.BottomLeft;
-            _unit.Location = new Point(x + w - 22, y + 8);
-            _unit.Size = new Size(22, 22);
             host.Controls.Add(_unit);
 
             _cap.AutoSize = false;
-            _cap.Font = Ui.FontSmall;
             _cap.ForeColor = Ui.Label;
             _cap.BackColor = Color.Transparent;
             _cap.TextAlign = ContentAlignment.TopRight;
-            _cap.Location = new Point(x, y + 32);
-            _cap.Size = new Size(w, 18);
             host.Controls.Add(_cap);
+        }
+
+        /// <summary>按当前缩放重排（Resize 时调用）。</summary>
+        public void Layout(int x, int y, int w, double s, Font valFont, Font unitFont, Font capFont)
+        {
+            _x = x; _w = w;
+            int unitW = Ui.S(26, s);
+            int valH = Math.Max(valFont.Height, Ui.S(22, s));
+            _val.Font = valFont;
+            _val.Location = new Point(x, y);
+            _val.Size = new Size(w - unitW, valH);
+            _unit.Font = unitFont;
+            _unit.Location = new Point(x + w - unitW, y + valH - unitFont.Height - Ui.S(2, s));
+            _unit.Size = new Size(unitW, unitFont.Height + Ui.S(4, s));
+            _cap.Font = capFont;
+            _cap.Location = new Point(x, y + valH + Ui.S(2, s));
+            _cap.Size = new Size(w, Ui.TextH(capFont, s));
         }
 
         /// <summary>value 为空表示暂无数据（显示 —）。level&gt;0 时数值走档位色，标签后加档位字。</summary>
