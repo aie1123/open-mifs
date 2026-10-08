@@ -192,3 +192,46 @@
 3. 对比度（已实测，写进 token 表）：标签 `#6B6B73` 白底 **5.28:1** / 窗口底 **4.84:1**；
    语义四色文字版 5.60 / 5.32 / 5.47 / 7.14:1 全部 ≥4.5；`Muted #A1A1AA` 仅 2.56:1，**只准用于禁用/未实现/装饰**
 4. 未实现项折叠后，首屏必须能一眼看到：性能模式、风扇转速、CPU 温度/功耗 —— 四项都在
+
+---
+
+## 8. 交叉核对：`ui-ux-pro-max` 技能（本地可检索数据库）
+
+安装位置 `~\.agents\skills\ui-ux-pro-max`（73 个文件 / 3.5 MB，含 17 份 CSV/JSON 数据库 +
+`references/quick-reference.md` 119 条 UX 规则 + `scripts/search.py`）。**已在本机实跑验证**
+（Python 3.14）。以下是它对本次定调的实际作用与局限。
+
+### 8.1 它证实了什么
+
+| 查询 | 它给出的 | 对定调的影响 |
+| :--- | :--- | :--- |
+| `--domain product "dashboard admin panel"` | 「Smart Home/IoT Dashboard」→ 仪表盘风格 **Real-Time Monitoring**，配色关注点 **Dark + Status indicator colors** | **支持**本方案把"语义四色"作为配色中心（与 §1.1 一致） |
+| `--domain ux "desktop monitoring dashboard readability"` | Number Formatting（大数用千分位/缩写）、Line Height（1.5–1.75）等 | 与本方案"数值主角 + 读数行高 24"一致；**新增待办**：RPM/内存字节数用千分位或缩写 |
+| 优先级表 | P1 可访问性 **CRITICAL**（对比度 4.5:1、键盘导航、**不要去掉焦点环**） | 我在 §1 漏了**焦点态** → 见 8.2 |
+
+### 8.2 它暴露的两个 token 缺口（本方案已补）
+
+1. **焦点可见（`Ring`）**：我原表只有 6 个基础色，没定义键盘焦点。补：
+   - `Ring` = `#1B1B1E`（墨色 2px 外框 + 1px 内白），在 `Surface` 与 `Recessed` 上都可见；
+     2px 墨色对 `#F5F5F4` 对比度 **15.75:1** ✓
+   - 交互控件必须有 `TabIndex` 顺序、`AccessibleName`（WinForms 里 `AccessibleName` 默认空）
+2. **危险动作色（`Destructive`）**：取消/删除类操作（如「删除开机自启任务」）需要独立色：
+   - `Destructive` = `#A82424`（与"烫"同值，7.14:1）——**复用语义红**，避免再加一个红
+
+### 8.3 它的局限（必须翻译，不能照搬）
+
+| 局限 | 说明 | 我们的翻译 |
+| :--- | :--- | :--- |
+| **没有 `hardware monitor` / `system utility` 产品档案** | 「system utility hardware monitor」查询返回 **0 结果**（工具本身提示要明说"未命中"） | 产品档案只能靠 §0 的 brief 自己定；只用它的 ux/color 数据 |
+| **没有 `winforms` 栈** | 桌面栈里最接近的是 `wpf`/`winui`/`avalonia`/`uwp`/`uno`/`javafx`，内容是 XAML/MVVM 专用（`ObservableCollection`、附加属性、绑定） | 本项目是**手写布局 + 无数据绑定**的 WinForms，栈规则基本不适用；只取通用 UX 与色彩数据 |
+| 触控优先规则 | P2 把「触控目标 ≥44×44px」列为 CRITICAL | 鼠标驱动的密集面板按 Windows 惯例：点击目标 ≥24×24、间距 ≥8；44 仅在未来支持触屏时启用 |
+| 排版规则按 Web | 「正文基准 16px / 行高 1.5」 | 桌面密集界面用 9pt/11pt；行高 24px ÷ 11pt ≈ 1.5，**换算后其实吻合** ✓ |
+| 字体搭配是 Google Fonts | 74 组配对全是西文 Web 字体 | 中文界面 + 系统字体约束 → 不可用；维持 `YaHei UI` + `Consolas` 的两角色本地方案 |
+
+### 8.4 可用的其余能力（暂未使用，按需再跑）
+
+- `--domain color`：192 套成品调色板（含 `Primary/On-Primary/Card/Muted/Border/Destructive/Ring` 全套 token）。
+  查到的中性方案是**冷灰**系（`#F8FAFC` 底 / `#1E293B` 前景 / `#475569` 主色 / `#DC2626` 危险），
+  与本方案的**暖中性 + 仪器灰**形成 A/B 两个方向 —— 如果觉得"仪器感"太冷，可切这套"办公中性"。
+- `--design-system --project-name ... --variance/--motion/--density`：生成完整设计系统文件（未跑，会落盘）。
+- `--domain icons`（105 个 Phosphor 图标）、`--domain chart`（25 类图表）、`--domain gsap`（动效预设）。
