@@ -522,6 +522,7 @@ ACPI WMI 方法必须在**实例**上调用，不能在类上调用。本工具�
 | [docs/FAN-CONTROL.md](docs/FAN-CONTROL.md) | 风扇调速可行性分析、三条路线、实测结论 |
 | [docs/TRAY-TOOLTIP.md](docs/TRAY-TOOLTIP.md) | 托盘提示与图标自定义（白名单、最坏宽度预算、变色阈值、DPI 坑） |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模块划分、数据流、线程模型、扩展点 |
+| [docs/UI-DESIGN.md](docs/UI-DESIGN.md) | 界面设计定调：token 系统（配色/字阶/间距）、布局与对齐规则、按严重度排序的问题清单 |
 | [docs/TESTED-MODELS.md](docs/TESTED-MODELS.md) | 机型实测矩阵与实测数据 |
 | [AGENTS.md](AGENTS.md) | **给 AI 编码助手的项目约定**：构建、验证纪律、禁区、发布流程 |
 | [docs/REPO-METADATA.md](docs/REPO-METADATA.md) | 仓库 About 文案、Topics、发版核对清单 |
