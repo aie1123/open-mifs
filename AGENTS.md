@@ -1,4 +1,4 @@
-# AGENTS.md — OpenMIFS 项目约定
+﻿# AGENTS.md — OpenMIFS 项目约定
 
 > 给 AI 编码助手（以及新加入的人）看的。**动手前先读完这页**，这里写的都是踩过坑换来的。
 
@@ -85,12 +85,18 @@
 **回归模式**：`o.exe --toggle-test=3` 会"隐藏启动 → 置为最小化+已隐藏 → 反复切换可见性"，
 用于守住历史上那条栈溢出崩溃路径（见 CHANGELOG 0.5.4）。改可见性相关代码后跑它。
 
-**UI 可见性切换的铁律**（0.5.4 血案）：
-`HideToTray()` / `Restore()` 会改 `ShowInTaskbar`，从而**触发句柄重建 → 再次引发 `Resize`**。
-所以：① 必须有防重入标志；② `HideToTray()` 必须把 `WindowState` 归位（否则 `Resize` 里的
-"== Minimized" 判定恒真）；③ `Restore()` 要先归位 WindowState 再做显示操作。
-栈溢出的表现是**进程静默消失**（无异常日志），只能靠事件日志的 `0xc00000fd` 认出来，
-用 `--toggle-test` 可稳定复现。
+**UI 可见性切换的铁律**（0.5.4 + 0.5.5 两次血案）：
+
+1. **防重入**：`HideToTray()` / `Restore()` 会改 `ShowInTaskbar` → **触发句柄重建 → 再次引发 `Resize`**，
+   必须用互斥标志挡住（否则 0.5.4 那种栈溢出：进程静默消失，只能靠事件日志 `0xc00000fd` 认出）。
+2. **`HideToTray()` 必须把 `WindowState` 归位**，否则 `Resize` 里 "== Minimized" 判定恒真 → 无限互递归。
+3. **`Restore()` 必须"先 `Show()`，再 `WindowState = Normal`"**（0.5.5 血案：反过来写会把窗口
+   冻结在最小化占位坐标 `(-25600,-25600)`，`Show()` 只让它"可见"、不会挪回屏幕 → 用户点显示却什么都看不到）。
+4. **显示后必须做屏幕内兜底**（`EnsureOnScreen()`）：矩形若完全落在所有屏幕之外就挪回主屏居中。
+   没有这一步，坐标一旦跑到屏幕外，用户再也点不回来，只能重启程序。
+5. `--tray` 启动路径**不要用 `WindowState = Minimized`**（占位坐标的来源），`Opacity = 0` 已足够避免闪烁。
+
+回归模式 `--toggle-test=N` 每次切换后会记录 `Visible/State/Bounds/在屏幕内`，改可见性代码后必跑。
 
 ---
 

@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.5.4.0")]
-[assembly: AssemblyFileVersion("0.5.4.0")]
+[assembly: AssemblyVersion("0.5.5.0")]
+[assembly: AssemblyFileVersion("0.5.5.0")]
 
 namespace OpenMIFS
 {
@@ -1378,12 +1378,41 @@ namespace OpenMIFS
 
         private void RestoreCore()
         {
-            // 顺序很重要：先把 WindowState 归位，再做"会引发句柄重建/重新布局"的操作，
-            // 这样 Resize 处理器看到的永远是 Normal，不会反过来调 HideToTray。
-            if (WindowState != FormWindowState.Normal) WindowState = FormWindowState.Normal;
+            // 顺序很重要（0.5.5 血案）：必须 **先 Show() 再归位 WindowState**。
+            // 反过来写（先 Normal 再 Show）会把窗口冻结在"最小化占位坐标"上 ——
+            // Windows 给最小化窗口的矩形是 (-25600,-25600) 这类屏幕外坐标，
+            // 而 Show() 只让窗口变"可见"，不会把它挪回屏幕 → 用户点了显示却什么都看不到。
             ShowInTaskbar = true;
             Show();
+            WindowState = FormWindowState.Normal;
+            EnsureOnScreen();
             Activate();
+        }
+
+        /// <summary>兜底：窗口矩形若完全落在所有屏幕之外（最小化占位坐标、显示器拔掉等），
+        /// 就挪回主屏居中。没有这一步，一旦坐标跑到屏幕外，用户再也点不回来。</summary>
+        private void EnsureOnScreen()
+        {
+            try
+            {
+                Rectangle b = Bounds;
+                bool on = false;
+                Screen[] all = Screen.AllScreens;
+                for (int i = 0; i < all.Length; i++)
+                {
+                    if (all[i].WorkingArea.IntersectsWith(b)) { on = true; break; }
+                }
+                if (on) return;
+
+                Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+                int w = (Width > 200 && Width < wa.Width + 100) ? Width : 940;
+                int h = (Height > 200 && Height < wa.Height + 100) ? Height : 815;
+                int x = wa.X + Math.Max(0, (wa.Width - w) / 2);
+                int y = wa.Y + Math.Max(0, (wa.Height - h) / 3);
+                Location = new Point(x, y);
+                Log.Warn("窗口位置异常（" + b.ToString() + "）→ 已挪回主屏 (" + x + "," + y + ")");
+            }
+            catch (Exception ex) { Log.Ex("窗口位置兜底失败", ex); }
         }
 
         public void ToggleVisible()
@@ -3454,14 +3483,14 @@ namespace OpenMIFS
             if (startHidden)
             {
                 // 必须让控件创建句柄（否则传感器那边的 BeginInvoke 会抛异常），
-                // 所以先以"最小化 + 不显示在任务栏 + 完全透明"的方式 Show 一次，再收进托盘。
-                _form.WindowState = FormWindowState.Minimized;
+                // 做法：不显示在任务栏 + 完全透明地 Show 一次，再收进托盘。
+                // 注意**不要**用 WindowState=Minimized：那会让窗口拿到"最小化占位坐标"(-25600,-25600)，
+                // 之后 Show() 只让它变可见、不会挪回屏幕（0.5.5 修的正是这个）。
                 _form.ShowInTaskbar = false;
                 _form.Opacity = 0;
                 _form.Show();
                 _form.HideToTray();
                 _form.Opacity = 1;
-                _form.WindowState = FormWindowState.Normal;
                 Log.Info("以 --tray 启动：只驻留托盘，不显示主界面");
             }
             else
@@ -3585,6 +3614,17 @@ namespace OpenMIFS
         }
 
         internal void ToggleForTest() { _form.ToggleVisible(); }
+
+        /// <summary>回归用：描述当前窗口状态（可见性 / 状态 / 矩形 / 是否在屏幕内）。</summary>
+        internal string DescribeForTest()
+        {
+            Rectangle b = _form.Bounds;
+            bool on = false;
+            Screen[] all = Screen.AllScreens;
+            for (int i = 0; i < all.Length; i++) if (all[i].WorkingArea.IntersectsWith(b)) { on = true; break; }
+            return "Visible=" + _form.Visible + " State=" + _form.WindowState
+                 + " Bounds=" + b.ToString() + " 在屏幕内=" + on;
+        }
 
         internal void MinimizeForTest()
         {
@@ -3723,6 +3763,7 @@ namespace OpenMIFS
                     done++;
                     Log.Info("回归：第 " + done + " 次切换可见性");
                     tc.ToggleForTest();
+                    Log.Info("回归：切换后 " + tc.DescribeForTest());
                     if (done >= toggleTest) { reg.Stop(); Log.Info("回归：全部完成，未崩溃"); tc.ExitForTest(); }
                 };
                 reg.Start();
