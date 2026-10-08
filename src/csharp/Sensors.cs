@@ -619,9 +619,10 @@ namespace OpenMIFS
                         ? " " + speed.ToString(CultureInfo.InvariantCulture) + " MT/s（≈" 
                           + (speed / 2).ToString(CultureInfo.InvariantCulture) + " MHz 实际时钟）"
                         : "";
+                    // 总容量不在这里重复（「内存占用」行已经给了 x / y GB）；这里只讲"怎么组成的"
                     list.Add(new Reading("内存", "内存规格",
-                        string.Format(CultureInfo.InvariantCulture, "{0:0.0} GB  {1}×{2:0} GB {3}{4}",
-                            totalBytes / 1073741824.0, modules, totalBytes / 1073741824.0 / modules,
+                        string.Format(CultureInfo.InvariantCulture, "{0}×{1:0} GB {2}{3}",
+                            modules, totalBytes / 1073741824.0 / modules,
                             _memTypeCache, speed > 0 ? "-" + speed.ToString(CultureInfo.InvariantCulture) + " MT/s" : ""),
                         true, "WMI Win32_PhysicalMemory" + rate));
                 }
@@ -728,8 +729,10 @@ namespace OpenMIFS
                         }
                     }
 
-                    list.Add(new Reading("存储", "磁盘", name + (media.Length > 0 ? "（" + media + "）" : "")
-                        + "  " + string.Format(CultureInfo.InvariantCulture, "{0:0} GB", gb), true, note + "（容量与型号）"));
+                    // 值列只放容量（型号串太长，窄窗口/大缩放下会被挤掉）；型号与接口进说明（ToolTip 可见）
+                    list.Add(new Reading("存储", "磁盘",
+                        string.Format(CultureInfo.InvariantCulture, "{0:0} GB", gb), true,
+                        "型号 " + name + (media.Length > 0 ? "（" + media + "）" : "") + (note.Length > 0 ? "　" + note : "")));
                     list.Add(new Reading("存储", "磁盘温度", tempText, tempOk, tempNote));
                 }
             }

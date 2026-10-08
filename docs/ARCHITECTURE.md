@@ -1,4 +1,4 @@
-# 架构
+﻿# 架构
 
 > 目标读者：要改这个项目的人（或 AI 助手）。讲清**模块边界、数据怎么流、线程怎么摆、扩展点在哪**。
 > 具体协议细节见 [PROTOCOL.md](PROTOCOL.md)，传感器来源见 [SENSORS.md](SENSORS.md)。
@@ -49,7 +49,7 @@
 | `Log` | 日志 | `%LOCALAPPDATA%\OpenMIFS\openmifs.log`，>1 MB 轮转；三种形态共用 |
 | `Proc` | 安静调外部命令 | `schtasks` / `sc` / `taskkill` 的 stderr 在 `$ErrorActionPreference='Stop'` 下会炸，这里统一吞掉并返回 exit code |
 | `Startup` | 计划任务 | `/RL HIGHEST` 免 UAC；**命令行必须带 `--tray`**；`RepairIfNeeded()` 用 `/XML` 检查老任务并重建 |
-| `Osd` / `OsdDpi` / `OsdOverlay` | 官方 OSD 诊断、DPI 兼容修复、自带屏幕提示 | 自带提示在 `auto` 模式下会**让位**给官方 OSD（等 350 ms 看 `FloatingNativeWindow` 是否可见） |
+| `Osd` / `OsdOverlay` | 官方 OSD 诊断、自带屏幕提示 | 自带提示在 `auto` 模式下会**让位**给官方 OSD（等 350 ms 看 `FloatingNativeWindow` 是否可见） |
 | `MainForm` | 界面与刷新调度 | 键值行渲染（`KvRow`）、`SensorOrder` 决定阅读顺序、窗口可缩放 |
 | `TrayContext` | 托盘图标/菜单/定时刷新 | 5 秒一轮；`--tray` 模式只驻留托盘 |
 | `TrayText` | 悬停提示文案 | 白名单 + **最坏宽度预算**（详见 TRAY-TOOLTIP.md）；维护值快照 |

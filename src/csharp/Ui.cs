@@ -4,7 +4,7 @@
 //  设计依据：docs/UI-DESIGN.md（v2）
 //    · token 唯一来源：颜色 / 字体 / 间距 全部从这里取，主窗体不再写死色值
 //    · 表面语义：凹陷方角 = 只读读数；平面圆角 4 = 可交互
-//    · 状态永不只靠颜色：档位同时给「凉/温/热/烫」文字（ui-ux-pro-max: Color Only, High）
+//    · 档位只用颜色表达（用户明确不要「凉/温/热/烫」文字）；档位色 = 托盘图标同一套阈值
 //    · 键盘可达：自绘控件带 2px 焦点环（Ring）；Tab 顺序由调用方给定
 //  语法约束：.NET Framework 自带 csc 仅支持 C# 5（无字符串插值 / ?. / nameof）
 // =====================================================================
@@ -48,6 +48,7 @@ namespace OpenMIFS
             float size = (float)(pt * s);
             if (size < 5F) size = 5F;
             if (size > 40F) size = 40F;
+            size = (float)(Math.Round(size * 4.0) / 4.0);   // 量化到 0.25pt：拖动时缓存不会爆、GDI 句柄不churn
             string key = (mono ? "m" : "y") + (bold ? "b" : "r") + size.ToString("0.##", CultureInfo.InvariantCulture);
             Font f;
             if (_fontCache.TryGetValue(key, out f)) return f;
@@ -62,7 +63,7 @@ namespace OpenMIFS
         public static int S(double v, double s) { return (int)Math.Round(v * s); }
 
         /// <summary>标签高度：按字体实际行高给，避免中文下缘被截断。</summary>
-        public static int TextH(Font f, double s) { return Math.Max(f.Height + S(2, s), S(14, s)); }
+        public static int TextH(Font f, double s) { return Math.Max(f.Height + Math.Max(3, S(4, s)), S(16, s)); }
 
         // ── 字体（4 档，见 §1.3）
         public static readonly Font FontTitle = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
@@ -101,15 +102,6 @@ namespace OpenMIFS
             return Scald;
         }
 
-        /// <summary>档位字：颜色之外的第二通道（Color Only 规则的落法）。</summary>
-        public static string LevelWord(int level)
-        {
-            if (level <= 1) return "凉";
-            if (level == 2) return "温";
-            if (level == 3) return "热";
-            return "烫";
-        }
-
         /// <summary>把 "23.96 W" / "55 ℃" 拆成数值与单位；拆不开就整体当数值。</summary>
         public static void SplitUnit(string raw, out string value, out string unit)
         {
@@ -133,8 +125,10 @@ namespace OpenMIFS
         public static string Tidy(string s)
         {
             if (string.IsNullOrEmpty(s)) return s;
-            return s.Replace(".0 GB", " GB").Replace(".0 %", " %").Replace(".0 GHz", " GHz")
-                    .Replace(".0 W", " W").Replace(".0 RPM", " RPM");
+            s = s.Replace(".0 GB", " GB").Replace(".0 %", " %").Replace(".0 GHz", " GHz")
+                 .Replace(".0 W", " W").Replace(".0 RPM", " RPM");
+            while (s.IndexOf("  ") >= 0) s = s.Replace("  ", " ");   // 连续空格收成一个（省宽度）
+            return s;
         }
 
         /// <summary>供电类型 → 人话（0 电池 / 1 Type-C / 2 圆口）。</summary>
@@ -290,7 +284,7 @@ namespace OpenMIFS
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            TextRenderer.DrawText(e.Graphics, Text, Font, new Rectangle(0, 0, Width, 18), Ui.Ink,
+            TextRenderer.DrawText(e.Graphics, Text, Font, new Rectangle(0, 0, Width, Height - 1), Ui.Ink,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             using (Pen p = new Pen(Ui.Hairline)) e.Graphics.DrawLine(p, 0, Height - 1, Width, Height - 1);
         }
@@ -302,6 +296,13 @@ namespace OpenMIFS
         private readonly Label _key = new Label();
         private readonly Label _val = new Label();
         private readonly Label _unit = new Label();
+        private Font _valFont;          // 常规值字体（10pt 等宽）
+        private Font _valFontSmall;     // 值太长时降一档（9pt 等宽），保证不被裁掉
+        private string _rawValue = "";
+        private string _rawUnit = "";
+        private bool _rawOk = true;
+        private int _rawLevel;
+        private bool _hasValue;
 
         public ReadoutRow(Control host, string key)
         {
@@ -326,8 +327,9 @@ namespace OpenMIFS
         }
 
         /// <summary>按当前缩放重排（Resize 时调用）。</summary>
-        public void Layout(int y, int rowW, int rowH, double s, Font keyFont, Font valFont, Font unitFont)
+        public void Layout(int y, int rowW, int rowH, double s, Font keyFont, Font valFont, Font valFontSmall, Font unitFont)
         {
+            _valFont = valFont; _valFontSmall = valFontSmall;
             int labelW = Ui.S(Ui.LabelW, s), unitW = Ui.S(Ui.UnitW, s), gap = Ui.S(Ui.Gap, s);
             int h = Ui.TextH(keyFont, s);
             _key.Font = keyFont;
@@ -341,25 +343,61 @@ namespace OpenMIFS
             _unit.Font = unitFont;
             _unit.Location = new Point(rowW - unitW, y + (rowH - h) / 2);
             _unit.Size = new Size(unitW, h);
+            FitFont();      // 关键：重排后按新列宽重新决定字号（旧版在这里被重置回大字，导致拖动后长值被裁）
         }
 
         public Label ValueLabel { get { return _val; } }
 
-        /// <summary>ok=false → 数值走 Muted（不可用）；level&gt;0 → 档位色 + 档位字。</summary>
+        /// <summary>ok=false → 数值走 Muted（不可用）；level&gt;0 → 数值走档位色。</summary>
         public void Set(string value, string unit, bool ok, int level)
         {
-            _val.Text = value;
-            _val.ForeColor = !ok ? Ui.Muted : (level > 0 ? Ui.LevelColor(level) : Ui.Ink);
-            _unit.Text = unit;
-            _unit.ForeColor = ok ? Ui.Label : Ui.Muted;
+            _rawValue = value; _rawUnit = unit; _rawOk = ok; _rawLevel = level; _hasValue = true;
+            Apply();
+        }
+
+        /// <summary>把记住的原始值重新渲染一遍（含"按当前列宽选字号"）。</summary>
+        private void Apply()
+        {
+            if (!_hasValue) return;
+            _val.Text = _rawValue;
+            _val.ForeColor = !_rawOk ? Ui.Muted : (_rawLevel > 0 ? Ui.LevelColor(_rawLevel) : Ui.Ink);
+            _unit.Text = _rawUnit;
+            _unit.ForeColor = _rawOk ? Ui.Label : Ui.Muted;
+            FitFont();
+        }
+
+        /// <summary>值超出列宽就降一档字号（宁可小一点，也不要被裁掉半截）。</summary>
+        private void FitFont()
+        {
+            if (_valFont == null || _val.Width <= 0) return;
+            Font f = _valFont;
+            if (_valFontSmall != null)
+            {
+                int need = TextRenderer.MeasureText(_rawValue, _valFont,
+                    new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width;
+                if (need > _val.Width - Ui.S(4, 1)) f = _valFontSmall;
+            }
+            if (!object.ReferenceEquals(_val.Font, f)) _val.Font = f;
+        }
+
+        /// <summary>拖动窗口时只更新水平尺寸（不动纵向位置与字体档位选择逻辑），并重跑字号适配。</summary>
+        public void RefitWidth(int rowW, double s)
+        {
+            int labelW = Ui.S(Ui.LabelW, s), unitW = Ui.S(Ui.UnitW, s), gap = Ui.S(Ui.Gap, s);
+            _key.Width = labelW;
+            _val.Left = labelW + gap;
+            int valW = rowW - labelW - gap - unitW;
+            if (valW < Ui.S(40, s)) valW = Ui.S(40, s);
+            _val.Width = valW;
+            _unit.Left = rowW - unitW;
+            FitFont();
         }
 
         public void Set(string raw, bool ok, int level)
         {
             string v, u;
             Ui.SplitUnit(raw, out v, out u);
-            if (level > 0 && u.Length > 0) u = u + " " + Ui.LevelWord(level);
-            Set(v, u, ok, level);
+            Set(v, u, ok, level);      // 档位只用颜色表达（用户要求不显示文字档位）
         }
     }
 
@@ -369,6 +407,7 @@ namespace OpenMIFS
         private readonly Label _val = new Label();
         private readonly Label _unit = new Label();
         private readonly Label _cap = new Label();
+        private readonly Label _sub = new Label();   // 副读数（如风扇2），与主值同列右对齐
         private int _x, _w;
 
         public BigReadout(Control host)
@@ -390,13 +429,25 @@ namespace OpenMIFS
             _cap.BackColor = Color.Transparent;
             _cap.TextAlign = ContentAlignment.TopRight;
             host.Controls.Add(_cap);
+
+            _sub.AutoSize = false;
+            _sub.ForeColor = Ui.Label;
+            _sub.BackColor = Color.Transparent;
+            _sub.TextAlign = ContentAlignment.MiddleRight;
+            host.Controls.Add(_sub);
         }
 
+        /// <summary>副读数（可为空字符串表示不显示）。</summary>
+        public void Sub(string text) { _sub.Text = text; }
+
         /// <summary>按当前缩放重排（Resize 时调用）。</summary>
-        public void Layout(int x, int y, int w, double s, Font valFont, Font unitFont, Font capFont)
+        public void Layout(int x, int y, int w, double s, Font valFont, Font unitFont, Font capFont, Font subFont)
         {
             _x = x; _w = w;
-            int unitW = Ui.S(26, s);
+            // 单位列宽按文字实际宽度实测（NoPadding 去掉多余空隙，"RPM" 才不会被裁成 "R"）
+            int unitW = TextRenderer.MeasureText("RPM", unitFont,
+                new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width + Ui.S(4, s);
+            if (unitW < Ui.S(24, s)) unitW = Ui.S(24, s);
             int valH = Math.Max(valFont.Height, Ui.S(22, s));
             _val.Font = valFont;
             _val.Location = new Point(x, y);
@@ -407,16 +458,19 @@ namespace OpenMIFS
             _cap.Font = capFont;
             _cap.Location = new Point(x, y + valH + Ui.S(2, s));
             _cap.Size = new Size(w, Ui.TextH(capFont, s));
+            _sub.Font = subFont;
+            _sub.Location = new Point(x, y + valH + Ui.S(2, s) + Ui.TextH(capFont, s));
+            _sub.Size = new Size(w, Ui.TextH(subFont, s));
         }
 
-        /// <summary>value 为空表示暂无数据（显示 —）。level&gt;0 时数值走档位色，标签后加档位字。</summary>
+        /// <summary>value 为空表示暂无数据（显示 —）。level&gt;0 时数值走档位色。</summary>
         public void Set(string value, string unit, string caption, int level, bool ok)
         {
             bool has = ok && !string.IsNullOrEmpty(value);
             _val.Text = has ? value : "—";
             _val.ForeColor = !has ? Ui.Muted : (level > 0 ? Ui.LevelColor(level) : Ui.Ink);
             _unit.Text = has ? unit : "";
-            _cap.Text = (level > 0 && has) ? caption + " · " + Ui.LevelWord(level) : caption;
+            _cap.Text = caption;      // 不再拼"· 凉/温/热/烫"（用户要求去掉）
             _cap.ForeColor = (!has || level == 0) ? Ui.Label : Ui.LevelColor(level);
         }
     }

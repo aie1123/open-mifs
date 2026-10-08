@@ -1,4 +1,4 @@
-﻿# AGENTS.md — OpenMIFS 项目约定
+# AGENTS.md — OpenMIFS 项目约定
 
 > 给 AI 编码助手（以及新加入的人）看的。**动手前先读完这页**，这里写的都是踩过坑换来的。
 
@@ -111,6 +111,30 @@
    图标存在 → 构建 → 上传 artifact → tag 时建 Release
 5. **验证发布产物**：下载 Release 里的 exe，检查大小与关键字符串（`Has $bytes '…'` 搜 UTF-16 字面量）。
    注意本机直连 GitHub 不通，需走代理 `http://127.0.0.1:7890`（Clash 未启动时会失败，等它起来再推）
+
+> ⛔ **注意**：上面 1~5 是**旧流程**，已作废（只有第 5 条"验证发布产物"仍然有效，
+> 移到了 §6.1 第 7 步）。作者明确要求改成"两段式"，见 §6.1。
+> 未经作者本地验收就 push / 建 Release 属于流程错误（作者原话：*"能不能每次改完先别提交发布，
+> 我在本地替换测试没问题后再推送和发布？"*）。
+
+### 6.1 两段式流程（**当前生效**）
+
+**第一段：改 + 构建 + 交给作者测试 —— 此段禁止 `git commit` / `git tag` / `git push` / 建 Release**
+
+1. 改代码 → `build\build.ps1` → 产出 `dist\OpenMIFS.exe`
+2. 自己做机器自查（第 5 节的 asInvoker 副本截图 / `--toggle-test` / 真跑 CLI 动作）—— 这是"我能证明它能跑"，
+   **不等于**作者验收
+3. 向作者汇报三件事，然后**停下等回复**：
+   - 改了什么（逐条对应他提的问题）
+   - `dist\OpenMIFS.exe` 的**大小 + SHA256**（构建脚本末尾会打印）
+   - 覆盖哪个路径去测（本机是 `C:\Users\16609\OpenMIFS.exe`，先退掉托盘里的旧实例）
+4. 版本号、`CHANGELOG.md` 可以**先写好但不提交**，发布时一次成型
+5. 作者说"有问题" → 在**同一批未提交改动**上继续改，回到第 1 步（不要为了干净而中途提交）
+
+**第二段：作者明确说"没问题 / 推送 / 发版"之后**
+
+6. 确认版本号 + 提交 + `git tag -a vX.Y.Z` + `git push origin main` + `git push origin vX.Y.Z`
+7. 验证发布产物（大小、UTF-16 关键字符串），确认 CI badge 通过
 
 版本号在 `src/csharp/OpenMIFS.cs` 的 `AssemblyVersion` / `AssemblyFileVersion`，
 界面与托盘显示的是 `MifsApp.VersionText`（三位，如 `0.5.3`）。

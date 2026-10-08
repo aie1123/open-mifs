@@ -29,9 +29,7 @@
     .\mifs.ps1 osd status          OSD（Fn 屏幕提示）服务/进程状态
     .\mifs.ps1 osd restart         重启 OSD 服务与界面进程（修复 OSD 不显示的第一招）
     .\mifs.ps1 osd diagnose        OSD 诊断（服务/进程/安装日志/显示环境/事件日志）
-    .\mifs.ps1 osd dpi             OSD DPI 兼容修复状态（本机 OSD 进程不感知 DPI）
-    .\mifs.ps1 osd dpi-on          写入 DPI 兼容标记 ~ HIGHDPIAWARE（可撤销）
-    .\mifs.ps1 osd dpi-off         撤销 DPI 兼容标记
+
     .\mifs.ps1 startup status      开机自启（计划任务 OpenMIFS）状态
     .\mifs.ps1 startup on|off      开关开机自启（计划任务 /RL HIGHEST + --tray，登录时静默进托盘、不弹窗）
     .\mifs.ps1 log                 打印日志路径并显示最后 20 行
@@ -42,9 +40,9 @@
 
   安全
     status / sensors / sensors probe / probe / test / scan / raw
-    osd status / osd diagnose / osd dpi / startup status / log
+    osd status / osd diagnose / startup status / log
                                         只读，不改任何状态。
-    mode / fanboost / kbd / osd restart / osd dpi-on|off / startup on|off
+    mode / fanboost / kbd / osd restart / startup on|off
                                         会写 EC 寄存器、注册表或计划任务，均为可逆操作。
     不要在未确认含义的情况下对未知功能号发 SET。
 #>
@@ -218,90 +216,7 @@ $script:OsdService = 'BLDHotKeyService'
 $script:OsdUtility = 'BLDFnHotkeyUtility.exe'
 $script:OsdDir     = 'C:\Program Files\OSD'
 
-# DPI 兼容标记：OSD 界面进程不感知 DPI，125%/150% 缩放下分层提示可能静默画不出来。
-# 这条注册表项就是「属性 → 兼容性 → 更改高 DPI 设置」写的东西，删掉即还原。
-$script:DpiKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers'
-$script:DpiExe = Join-Path $script:OsdDir $script:OsdUtility
-$script:DpiVal = '~ HIGHDPIAWARE'
 
-function Get-OsdDpiFlag {
-    try {
-        $item = Get-ItemProperty -Path $script:DpiKey -ErrorAction SilentlyContinue
-        if ($item) {
-            $p = $item.PSObject.Properties[$script:DpiExe]
-            if ($p) { return [string]$p.Value }
-        }
-    }
-    catch { }
-    return ''
-}
-
-function Test-OsdDpiEnabled { return ((Get-OsdDpiFlag) -match 'HIGHDPIAWARE') }
-
-# 注意：powershell.exe 是 DPI 不感知进程，GetDpiForSystem / GetDpiForMonitor / Graphics.DpiX
-# 在这种进程里一律返回 96，会把 125% 缩放误报成 100%。唯一可靠的办法是拿
-# 「物理分辨率 ÷ 该进程看到的虚拟分辨率」这个比值。
-function Get-SystemDpi {
-    # ① 注册表里系统实际应用的 DPI，最准
-    try {
-        $a = (Get-ItemProperty 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name AppliedDPI -ErrorAction Stop).AppliedDPI
-        if ($a -ge 96) { return [int]$a }
-    }
-    catch { }
-    # ② 物理分辨率 ÷ 该进程看到的虚拟分辨率
-    try {
-        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-        $virt = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
-        $phys = (Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
-                 Where-Object { $_.CurrentHorizontalResolution -gt 0 } |
-                 Sort-Object CurrentHorizontalResolution -Descending |
-                 Select-Object -First 1).CurrentHorizontalResolution
-        if ($virt -gt 0 -and $phys -gt 0) {
-            $pct = [math]::Round($phys / $virt * 100)
-            if ($pct -ge 100 -and $pct -le 350) { return [int][math]::Round(96 * $pct / 100) }
-        }
-    }
-    catch { }
-    try {
-        Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
-        return [int][System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero).DpiX
-    }
-    catch { return 0 }
-}
-
-# schtasks / sc / taskkill 会把错误写到 stderr；在 $ErrorActionPreference='Stop' 下
-# PowerShell 5.1 会把原生命令的 stderr 当成终止性错误抛出。调用前临时改成 Continue。
-function Invoke-NativeQuiet {
-    param([string]$Exe, [string[]]$Arguments)
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { $out = & $Exe @Arguments 2>&1; $code = $LASTEXITCODE }
-    finally { $ErrorActionPreference = $prev }
-    return [pscustomobject]@{ ExitCode = $code; Output = ($out | ForEach-Object { "$_" }) -join ' ' }
-}
-
-function Set-OsdDpiFlag {
-    param([bool]$Enable)
-    try {
-        if (-not (Test-Path $script:DpiKey)) { New-Item -Path $script:DpiKey -Force | Out-Null }
-        if ($Enable) {
-            New-ItemProperty -Path $script:DpiKey -Name $script:DpiExe -Value $script:DpiVal -PropertyType String -Force | Out-Null
-            Write-MifsLog 'INFO ' ("OSD DPI 兼容修复：写入 {0} = {1}" -f $script:DpiExe, $script:DpiVal)
-            Write-Host ("已写入 DPI 兼容标记：{0} = {1}" -f $script:DpiExe, $script:DpiVal) -ForegroundColor Green
-            Write-Host '下一步：.\mifs.ps1 osd restart，然后按一次 Fn 看提示是否出现。' -ForegroundColor Yellow
-            Write-Host '撤销：.\mifs.ps1 osd dpi-off' -ForegroundColor DarkGray
-        }
-        else {
-            Remove-ItemProperty -Path $script:DpiKey -Name $script:DpiExe -ErrorAction SilentlyContinue
-            Write-MifsLog 'INFO ' ("OSD DPI 兼容修复：已删除 {0} 的标记" -f $script:DpiExe)
-            Write-Host '已撤销 DPI 兼容标记（删除注册表值）。' -ForegroundColor Green
-        }
-    }
-    catch {
-        Write-MifsLog 'ERROR' ("设置 OSD DPI 兼容标记失败：{0}" -f $_.Exception.Message)
-        Write-Host ("设置失败：{0}" -f $_.Exception.Message) -ForegroundColor Red
-    }
-}
 
 function Get-OsdState {
     $svc = Get-CimInstance Win32_Service -Filter "Name='$($script:OsdService)'" -ErrorAction SilentlyContinue
@@ -330,15 +245,13 @@ function Show-OsdStatus {
     Write-Host ("界面进程      : {0} 个{1}" -f $s.UtilityCount,
         $(if ($s.UtilityPids) { "  (PID $($s.UtilityPids)，启动于 $($s.UtilitySince))" } else { '' })) -ForegroundColor $(if ($s.UtilityCount -gt 0) { 'Green' } else { 'Red' })
     Write-Host ("安装目录      : {0}  {1}" -f $script:OsdDir, $(if (Test-Path $script:OsdDir) { '(存在)' } else { '(不存在！)' }))
-    $dpiOn = Test-OsdDpiEnabled
-    Write-Host ("DPI 兼容标记  : {0}" -f $(if ($dpiOn) { "已应用（$($script:DpiVal)）" } else { '未应用' })) -ForegroundColor $(if ($dpiOn) { 'Green' } else { 'DarkGray' })
+
     $dpi = Get-SystemDpi
     if ($dpi -gt 0) { Write-Host ("系统 DPI      : {0}（约 {1}% 缩放）" -f $dpi, [math]::Round($dpi / 96 * 100)) }
     Write-Host ''
     if ($s.ServiceState -eq 'Running' -and $s.UtilityCount -gt 0) {
         Write-Host '服务与进程都在跑。若屏幕上仍然看不到 OSD，按顺序试：' -ForegroundColor Yellow
         Write-Host '  .\mifs.ps1 osd diagnose     （先取证：Fn 事件到底有没有送到 OSD 进程）' -ForegroundColor Yellow
-        Write-Host '  .\mifs.ps1 osd dpi-on       （写入 DPI 兼容标记，主要嫌疑）' -ForegroundColor Yellow
         Write-Host '  .\mifs.ps1 osd restart      （重启服务与界面进程让设置生效）' -ForegroundColor Yellow
     }
     Write-Host ''
@@ -378,7 +291,6 @@ function Invoke-OsdDiagnose {
         if ($dpi -gt 0) { Write-Host ("  系统 DPI    : {0}（约 {1}% 缩放）" -f $dpi, [math]::Round($dpi / 96 * 100)) }
     }
     catch { }
-    Write-Host ("  DPI 兼容标记: {0}" -f $(if (Test-OsdDpiEnabled) { "已应用（$($script:DpiVal)）" } else { '未应用' }))
     Write-Host ''
     Write-Host '-- OSD 事件投递（OSDEvents，判断 Fn 事件有没有送到 OSD 进程）--'
     try {
@@ -1380,10 +1292,7 @@ try {
                 'status'   { Show-OsdStatus }
                 'restart'  { Invoke-OsdRestart }
                 'diagnose' { Invoke-OsdDiagnose }
-                'dpi'      { Write-Host ("DPI 兼容标记: {0}" -f $(if (Test-OsdDpiEnabled) { "已应用（$($script:DpiVal)）" } else { '未应用' })) }
-                'dpi-on'   { Set-OsdDpiFlag -Enable $true }
-                'dpi-off'  { Set-OsdDpiFlag -Enable $false }
-                default    { throw 'osd 需要 status / restart / diagnose / dpi / dpi-on / dpi-off' }
+                default    { throw 'osd 需要 status / restart / diagnose' }
             }
         }
         'startup' {

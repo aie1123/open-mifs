@@ -1,4 +1,4 @@
-# OSD（Fn 屏幕提示）问题与处理
+﻿# OSD（Fn 屏幕提示）问题与处理
 
 按 Fn 组合键时，笔记本通常会在屏幕上弹一个提示（音量、亮度、性能模式、Fn 锁……）。
 本机（机械革命 无界 14 Pro 2023）的这套提示由厂商组件提供，**不显示**是常见故障。
@@ -92,20 +92,26 @@ exe 主界面「启动与 OSD → 诊断 OSD」按钮做的是同一件事。
 ### 第 0 步：先做对照实验（不花钱、最省事）
 
 把系统缩放临时改成 **100%**（设置 → 系统 → 屏幕 → 缩放），注销或重启后按一次 Fn。
-提示出现了 → 基本可以确认是 DPI 相关问题，用下面的「DPI 兼容修复」固化。
+提示出现了 → 基本可以确认是 DPI 相关问题。
 用眼睛看结果，**不要**用 `OSDEvents` 判断成功 —— 它坏着也照样写日志。
 
-### 第 1 步：DPI 兼容修复（写一条可撤销的注册表值）
+### 第 1 步：手动写 DPI 兼容标记（可选，v0.6.2 起不再内置开关）
 
-exe 主界面「启动与 OSD → DPI 兼容修复（实验，可撤销）」：
+> **为什么去掉了内置开关**：这是针对「官方 OSD 界面进程不感知 DPI」的**推测性**修复
+> （见第 3 节判读），在测试机上从未被启用过，而 OSD 一直正常；留着等于给界面加一个只有嫌疑、
+> 没有证据的开关。需要时按下述方式手动加即可 —— 与「右键 exe → 属性 → 兼容性 → 更改高 DPI 设置」
+> 写的是同一条注册表项，**随时可删**：
 
+```powershell
+# 需要管理员。加：
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers' `
+  -Name 'C:\Program Files\OSD\BLDFnHotkeyUtility.exe' -Value '~ HIGHDPIAWARE' -PropertyType String -Force
+# 撤销：
+Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers' `
+  -Name 'C:\Program Files\OSD\BLDFnHotkeyUtility.exe'
 ```
-HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers
-    C:\Program Files\OSD\BLDFnHotkeyUtility.exe  =  "~ HIGHDPIAWARE"
-```
 
-这就是「右键 exe → 属性 → 兼容性 → 更改高 DPI 设置」写的同一条项。**取消勾选即删除该值**，无残留。
-写完需要重启 OSD 才生效（点「重启 OSD」按钮，或重新登录）。
+写完需要重启 OSD 才生效（界面「重启 OSD」按钮，或重新登录）。
 
 ### 第 2 步：重启服务与界面进程（可逆）
 

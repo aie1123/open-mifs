@@ -193,7 +193,7 @@ exe 主界面的「启动与 OSD」区域，或命令行：
 
 ```powershell
 .\src\mifs.ps1 osd status      # 服务、界面进程、系统 DPI、DPI 兼容标记状态
-.\src\mifs.ps1 osd dpi-on      # 写 DPI 兼容标记（~ HIGHDPIAWARE），主要嫌疑
+
 .\src\mifs.ps1 osd restart     # 重启 服务 → 界面进程，让设置生效
 .\src\mifs.ps1 osd diagnose    # 取证：OSDEvents / 心跳 / 显示环境 / DPI
 .\src\mifs.ps1 osd dpi-off     # 撤销 DPI 标记（删掉注册表值，无残留）

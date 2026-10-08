@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.6.1.0")]
-[assembly: AssemblyFileVersion("0.6.1.0")]
+[assembly: AssemblyVersion("0.6.2.0")]
+[assembly: AssemblyFileVersion("0.6.2.0")]
 
 namespace OpenMIFS
 {
@@ -887,15 +887,13 @@ namespace OpenMIFS
                     sb.AppendLine("  判读          : 缩放 100%，DPI 这条嫌疑下降。");
             }
             catch (Exception ex) { sb.AppendLine("  查询 DPI 失败：" + ex.Message); }
-            sb.AppendLine("  DPI 兼容标记  : " + (OsdDpi.IsEnabled()
-                ? "已应用（" + OsdDpi.FlagValue + "）"
-                : "未应用") + "   路径：" + OsdDpi.ExePath);
+
             sb.AppendLine();
 
             sb.AppendLine("== 结论提示（按嫌疑从高到低）==");
             sb.AppendLine("  1) DPI / 分层窗口：OSD 提示是 UpdateLayeredWindow 画的，进程又按 96 DPI 工作，");
             sb.AppendLine("     缩放 125%/150% 时可能静默失效（不报错、不崩溃、日志照写）。");
-            sb.AppendLine("     试：勾选「DPI 兼容修复」→ 重启 OSD → 按 Fn 看提示；或把缩放临时改成 100% 对照。");
+            sb.AppendLine("     试：把显示缩放临时改成 100% 对照；仍不出提示就查服务与进程（见 docs/OSD.md）。");
             sb.AppendLine("  2) Fn 事件是否送达：看上面 OSDEvents 有没有近期条目。有 = 接收正常，坏在显示。");
             sb.AppendLine("  3) 服务触发链路：看心跳最新一条距今多久。停写很久 = 服务这侧也断了。");
             sb.AppendLine("  4) 多显示器 / 缩放异常、第三方覆盖层（虚拟显示器、显卡 overlay）、杀软拦截。");
@@ -1050,69 +1048,6 @@ namespace OpenMIFS
         }
     }
 
-    // ──────────────────────────────────────────── OSD 的 DPI 兼容修复（可撤销）
-    // OSD 界面进程 BLDFnHotkeyUtility.exe 是 DPI 不感知的（清单里只有 asInvoker）。
-    // 在 125%/150% 缩放下，它用 UpdateLayeredWindow 画的提示可能静默失效。
-    // Windows 自带的兼容性标记可以强制它按系统 DPI 渲染：
-    //   HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers
-    //   值名 = 程序完整路径，值 = "~ HIGHDPIAWARE"
-    // 这是「兼容性 → 更改高 DPI 设置」界面写的同一条注册表项，随时可以删掉还原。
-    internal static class OsdDpi
-    {
-        private const string SubKey = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
-        public const string FlagValue = "~ HIGHDPIAWARE";
-
-        public static string ExePath { get { return Path.Combine(Osd.InstallDir, Osd.UtilityExe); } }
-
-        public static bool FileExists { get { return File.Exists(ExePath); } }
-
-        /// <summary>返回当前已写入的标记值，没有则返回 ""。</summary>
-        public static string Read()
-        {
-            try
-            {
-                using (RegistryKey baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
-                using (RegistryKey k = baseKey.OpenSubKey(SubKey))
-                {
-                    if (k == null) return "";
-                    object v = k.GetValue(ExePath);
-                    return v == null ? "" : v.ToString();
-                }
-            }
-            catch (Exception ex) { Log.Ex("读取 OSD DPI 兼容标记失败", ex); return ""; }
-        }
-
-        public static bool IsEnabled() { return Read().IndexOf("HIGHDPIAWARE", StringComparison.OrdinalIgnoreCase) >= 0; }
-
-        /// <summary>写入或删除标记，返回给用户看的结果文本。</summary>
-        public static string Apply(bool enable)
-        {
-            try
-            {
-                using (RegistryKey baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
-                using (RegistryKey k = baseKey.CreateSubKey(SubKey))
-                {
-                    if (k == null) return "无法打开注册表项（需要管理员权限）";
-                    if (enable)
-                    {
-                        k.SetValue(ExePath, FlagValue, RegistryValueKind.String);
-                        Log.Info("OSD DPI 兼容修复：写入 " + ExePath + " = " + FlagValue);
-                        return "已写入 DPI 兼容标记：" + Environment.NewLine + "  " + ExePath + " = " + FlagValue;
-                    }
-                    k.DeleteValue(ExePath, false);
-                    Log.Info("OSD DPI 兼容修复：已删除 " + ExePath + " 的标记");
-                    return "已撤销 DPI 兼容标记（删除注册表值）";
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Ex("写入 OSD DPI 兼容标记失败", ex);
-                return "写入失败：" + ex.Message;
-            }
-        }
-    }
-
-    // ───────────────────────────────────────────────────────── 应用级小工具
     internal static class MifsApp
     {
         public static bool IsElevated
@@ -1217,7 +1152,6 @@ namespace OpenMIFS
         private readonly Label _lblBadgeMode = new Label();
         private readonly Label _lblBadgeAc = new Label();
         private readonly Label _lblBadgeOsd = new Label();
-        private readonly Label _lblClock = new Label();
         private readonly FlatButton _btnRefreshNow = new FlatButton();
         private readonly FlatButton _btnElevate = new FlatButton();
 
@@ -1236,8 +1170,6 @@ namespace OpenMIFS
         private readonly FlatButton _btnOsdDir = new FlatButton();
         private readonly FlatButton _btnRecap = new FlatButton();
         private readonly CheckBox _chkStartup = new CheckBox();
-        private readonly CheckBox _chkDpi = new CheckBox();
-        private readonly Label _lblDpi = new Label();
 
         // ── 左列底部：偏好设置（折叠；N11）
         private readonly FlatButton _btnPrefs = new FlatButton();
@@ -1263,6 +1195,55 @@ namespace OpenMIFS
         private double _s = 1.0;          // 布局缩放系数（LayoutAll 计算）
         private bool _layoutBusy;         // 防重入：改尺寸会触发 Resize
         private bool _prefsOpen;
+        private readonly System.Windows.Forms.Timer _layoutTimer = new System.Windows.Forms.Timer();
+        private bool _layoutDirty;        // 尺寸变了但还没重排
+        private bool _resizing;           // 正在拖边框（WM_ENTERSIZEMOVE ~ WM_EXITSIZEMOVE）
+        private int _lastLayW = -1, _lastLayH = -1;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern int SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
+        private const int WM_SETREDRAW = 0x000B;
+
+        /// <summary>拖动改变大小时挂起重绘：几千次子控件尺寸变更只换来一次重画。</summary>
+        private void SuspendRedraw() { try { SendMessage(Handle, WM_SETREDRAW, 0, 0); } catch { } }
+        private void ResumeRedraw() { try { SendMessage(Handle, WM_SETREDRAW, 1, 0); Invalidate(true); } catch { } }
+
+        /// <summary>尺寸变化 → 攒 45ms 再重排一次（拖动时每秒上百个 Resize 事件只算一次）。</summary>
+        private void QueueLayout()
+        {
+            _layoutDirty = true;
+            if (!_layoutTimer.Enabled) _layoutTimer.Start();
+        }
+
+        /// <summary>
+        /// 拖动边框期间的廉价重排：只动几个容器与贴边控件（十几条属性赋值，&lt;1ms），
+        /// 不碰字体/读数行/簇标签 —— 完整重排等松手后做一次（实测完整重排 30~70ms，
+        /// 每帧都做就是拖动卡顿的来源）。
+        /// </summary>
+        private void LayoutCheap()
+        {
+            int W = ClientSize.Width, H = ClientSize.Height;
+            int X = Ui.S(12, _s), leftW = Ui.S(Ui.LeftW, _s), gap = Ui.S(Ui.Gap, _s);
+            int bottomY = H - Ui.S(32, _s);
+            _barLine.Width = W;
+            _btnRefreshNow.Left = W - Ui.S(106, _s);
+            _btnElevate.Left = W - Ui.S(226, _s);
+            _chkAuto.Top = bottomY;
+            _cmbInterval.Top = bottomY - Ui.S(1, _s);
+            _lblSensorHint.Top = bottomY + Ui.S(2, _s);
+            _lblSensorHint.Width = Math.Max(Ui.S(120, _s), W - X - Ui.S(188, _s));
+            int rx = X + leftW + Ui.S(12, _s);
+            int rw = Math.Max(Ui.S(240, _s), W - rx - X);
+            _pnlReadout.Left = rx;
+            // 明细行宽度也跟着变，并重跑字号适配（否则拖动过程中长值会被裁，要等 2 秒刷新才恢复）
+            int innerWCheap = rw - Ui.S(Ui.Pad, _s) * 2 - 4;
+            if (innerWCheap > Ui.S(120, _s))
+                for (int i = 0; i < _rows.Count; i++) _rows[i].RefitWidth(innerWCheap + 4, _s);
+            _pnlReadout.Width = rw;
+            _pnlReadout.Height = bottomY - Ui.S(52, _s) - Ui.S(8, _s);
+            _pnlPrefs.Width = leftW;
+            _lastLayW = -1; _lastLayH = -1;   // 松手后必须做一次完整重排
+        }
 
         // ── 右列：读数（凹陷面板；关键三项 + 三簇明细）
         private RecessedPanel _pnlReadout;
@@ -1321,6 +1302,7 @@ namespace OpenMIFS
             // 布局缩放由 LayoutAll() 自己算（见 Ui.F/Ui.S）；关掉 WinForms 的字体自动缩放，
             // 否则 125%/150% DPI 下会被二次放大 → 中文下缘被截断、偏好设置撑出窗口。
             AutoScaleMode = AutoScaleMode.None;
+            DoubleBuffered = true;              // 自绘控件 + 频繁重排：不双缓冲会闪
             ClientSize = new Size(940, 860);
             MinimumSize = new Size(720, 600);
             StartPosition = FormStartPosition.CenterScreen;
@@ -1332,6 +1314,7 @@ namespace OpenMIFS
             catch { }
 
             BuildUi();
+            LayoutAll(true);
             // 自动刷新：默认开（用户可关，选择记进 settings.txt）
             _chkAuto.Checked = Settings.Get("auto_refresh", "1") != "0";
             _chkAuto.Click += delegate
@@ -1340,8 +1323,20 @@ namespace OpenMIFS
                 Log.Info("自动刷新：" + (_chkAuto.Checked ? "开" : "关"));
             };
             _timer.Interval = 3000;
-            _timer.Tick += delegate { if (_chkAuto.Checked) RefreshAll(); };
+            // 拖动窗口时不刷新（MIFS/WMI 调用在 UI 线程上，会明显卡住拖动）
+            _timer.Tick += delegate { if (_chkAuto.Checked && !_resizing) RefreshAll(); };
             _timer.Start();
+
+            // 布局节流：Resize 只置脏标记，45ms 内合并成一次重排
+            _layoutTimer.Interval = 45;
+            _layoutTimer.Tick += delegate
+            {
+                _layoutTimer.Stop();
+                if (!_layoutDirty) return;
+                _layoutDirty = false;
+                if (_resizing) LayoutCheap();   // 拖动中：只挪容器与贴边控件（几十个属性，<1ms）
+                else LayoutAll(false);          // 松手后：完整重排（字号/行高/簇一起变）
+            };
 
             TrayText.Load();
             TrayIcon.Load();
@@ -1356,19 +1351,31 @@ namespace OpenMIFS
             // 专门盯 Fn 键会改的那几个 EC 值：官方 OSD 失效时由我们自己弹提示。
             // 1.5 秒一轮，只读 4 个功能号，开销很小。
             _osdWatch.Interval = 1500;
-            _osdWatch.Tick += delegate { CheckOsdWatch(); };
+            _osdWatch.Tick += delegate { if (!_resizing) CheckOsdWatch(); };   // 拖动时不读 EC
             _osdWatch.Start();
 
-            Shown += delegate { LayoutAll(); RefreshAll(); };
+            Shown += delegate { LayoutAll(true); RefreshAll(); };
             // 注意：HideToTray/Restore 会改 ShowInTaskbar（触发句柄重建），从而再次引发 Resize。
             // 必须防重入，否则"最小化后收进托盘 → 点显示主界面"会无限互递归 → 栈溢出崩溃（0xC00000FD）。
             Resize += delegate
             {
-                LayoutAll();   // 窗口大小变了 → 整体重排（字号/间距/面板一起缩放）
+                QueueLayout();   // 窗口大小变了 → 攒 45ms 合并重排（见 LayoutAll / _layoutTimer）
                 if (_visibilityBusy) return;
                 if (WindowState == FormWindowState.Minimized) HideToTray();
             };
             FormClosing += OnFormClosing;
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_ENTERSIZEMOVE = 0x0231, WM_EXITSIZEMOVE = 0x0232;
+            if (m.Msg == WM_ENTERSIZEMOVE) _resizing = true;
+            else if (m.Msg == WM_EXITSIZEMOVE)
+            {
+                _resizing = false;
+                QueueLayout();      // 松手后补一次最终布局
+            }
+            base.WndProc(ref m);
         }
 
         public void ForceClose()
@@ -1607,6 +1614,7 @@ namespace OpenMIFS
             _lblBrand.AutoSize = false;
             _lblBrand.Text = "OpenMIFS";
             _lblBrand.TextAlign = ContentAlignment.MiddleLeft;
+            _lblBrand.BackColor = Color.Transparent;
             Controls.Add(_lblBrand);
 
             Label[] badges = new Label[] { _lblBadgeMode, _lblBadgeAc, _lblBadgeOsd };
@@ -1614,12 +1622,10 @@ namespace OpenMIFS
             {
                 badges[i].AutoSize = false;
                 badges[i].TextAlign = ContentAlignment.MiddleLeft;
+                badges[i].BackColor = Color.Transparent;
                 Controls.Add(badges[i]);
             }
 
-            _lblClock.AutoSize = false;
-            _lblClock.TextAlign = ContentAlignment.MiddleRight;
-            Controls.Add(_lblClock);
 
             _btnRefreshNow.Text = "立即刷新";
             _btnRefreshNow.AccessibleName = "立即刷新";
@@ -1646,6 +1652,7 @@ namespace OpenMIFS
             for (int i = 0; i < ModeMap.Order.Length; i++)
             {
                 FlatButton b = new FlatButton();
+                b.Text = ModeMap.Order[i];
                 b.Tag = ModeMap.Order[i];
                 b.TabIndex = 10 + i;
                 b.AccessibleName = "性能模式：" + ModeMap.Order[i];
@@ -1660,6 +1667,7 @@ namespace OpenMIFS
             for (int i = 0; i < 4; i++)
             {
                 FlatButton b = new FlatButton();
+                b.Text = i.ToString(CultureInfo.InvariantCulture);
                 b.Tag = i;
                 b.TabIndex = 22 + i;
                 b.AccessibleName = "键盘背光等级 " + i.ToString(CultureInfo.InvariantCulture);
@@ -1674,7 +1682,7 @@ namespace OpenMIFS
             _btnBoost.Click += OnFanBoostClick;
             Controls.Add(_btnBoost);
 
-            Label[] notes = new Label[] { _lblModeNote, _lblKbdNote, _lblBoostNote, _lblDpi, _lblHintMode };
+            Label[] notes = new Label[] { _lblModeNote, _lblKbdNote, _lblBoostNote, _lblHintMode };
             for (int i = 0; i < notes.Length; i++)
             {
                 notes[i].AutoSize = false;
@@ -1710,7 +1718,6 @@ namespace OpenMIFS
             }
 
             WireCheck(_chkStartup, "开机自启（登录时静默进托盘）", OnStartupClick, 45);
-            WireCheck(_chkDpi, "DPI 兼容修复（实验，可撤销）", OnDpiFixClick, 46);
 
             _btnPrefs.Text = "\u25B8 偏好设置";
             _btnPrefs.TabIndex = 60;
@@ -1726,7 +1733,6 @@ namespace OpenMIFS
             // ── 右列：读数面板（凹陷方角 = 只读）
             _pnlReadout = new RecessedPanel();
             Controls.Add(_pnlReadout);
-            _tips.SetToolTip(_pnlReadout, "只读读数区：窗口可拖动缩放，这里会跟着变大。");
 
             for (int i = 0; i < 3; i++) _big[i] = new BigReadout(_pnlReadout);
 
@@ -1737,7 +1743,7 @@ namespace OpenMIFS
             string[] cluster = new string[] { "热与功耗", "频率与负载", "存储与电池" };
             string[][] clusterRows = new string[][]
             {
-                new string[] { "GPU 温度", "GPU 功耗" },
+                new string[] { "风扇2", "GPU 温度", "GPU 功耗" },   // 风扇2 走 MIFS（RefreshAll 供数），不是传感器项
                 new string[] { "CPU 频率", "CPU 负载", "GPU 利用率", "GPU 频率", "GPU 显存" },
                 new string[] { "内存占用", "内存规格", "磁盘温度", "磁盘", "电池" }
             };
@@ -1865,36 +1871,46 @@ namespace OpenMIFS
 
         // ────────────────────────────────────────────────────── 几何重排
         /// <summary>按窗口大小重排全部控件。Resize / Shown / 折叠切换时调用。</summary>
-        private void LayoutAll()
+        private void LayoutAll(bool force)
         {
             if (_layoutBusy || _pnlReadout == null) return;
             _layoutBusy = true;
             try
             {
                 int W = ClientSize.Width, H = ClientSize.Height;
+                if (!force && W == _lastLayW && H == _lastLayH) return;   // 尺寸没变就别白算一遍（force=折叠切换等必须重排）
+                _lastLayW = W; _lastLayH = H;
+                SuspendRedraw();                                // 重排期间不重画，最后一次性恢复
                 double s = Math.Min(W / 940.0, H / 860.0);      // 设计画布 940×860
                 if (s < 0.78) s = 0.78;
                 if (s > 2.20) s = 2.20;
                 _s = s;
 
                 Font fUi = Ui.F(9F, false, false, s), fBold = Ui.F(9F, true, false, s), f8 = Ui.F(8F, false, false, s);
-                Font fVal = Ui.F(11F, true, true, s), fBig = Ui.F(17F, true, true, s);
+                Font fVal = Ui.F(10F, true, true, s), fValSmall = Ui.F(9F, true, true, s), fBig = Ui.F(17F, true, true, s), fSub = Ui.F(9F, true, true, s);
                 int X = Ui.S(12, s), leftW = Ui.S(Ui.LeftW, s), pad = Ui.S(Ui.Pad, s), gap = Ui.S(Ui.Gap, s);
                 int ctrlH = Ui.S(Ui.CtrlH, s), rowH = Ui.S(Ui.RowH, s), h8 = Ui.TextH(f8, s);
                 int topY = Ui.S(52, s), bottomY = H - Ui.S(32, s);
 
                 // ── 顶部状态条
+                // 状态条：高度按字体行高、宽度按文字实测 —— 并且徽标必须排在品牌**实际宽度**之后，
+                // 否则品牌的底板会盖住「均衡」的头一个字（曾表现为"均字被截断"）。
+                int sbH = Ui.S(Ui.StatusBarH, s);
+                int brandH = Ui.TextH(fBold, s);
+                int brandW = TextRenderer.MeasureText("OpenMIFS", fBold,
+                    new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width + Ui.S(10, s);
                 _lblBrand.Font = fBold;
-                _lblBrand.Location = new Point(X, Ui.S(8, s));
-                _lblBrand.Size = new Size(Ui.S(92, s), Ui.S(24, s));
+                _lblBrand.Location = new Point(X, (sbH - brandH) / 2);
+                _lblBrand.Size = new Size(brandW, brandH);
                 Label[] badges = new Label[] { _lblBadgeMode, _lblBadgeAc, _lblBadgeOsd };
                 int[] bw = new int[] { Ui.S(72, s), Ui.S(112, s), Ui.S(170, s) };
-                int bx = X + Ui.S(86, s);
+                int badgeH = Ui.TextH(fUi, s);
+                int bx = X + brandW + gap;
                 for (int i = 0; i < badges.Length; i++)
                 {
                     badges[i].Font = fUi;
-                    badges[i].Location = new Point(bx, Ui.S(8, s));
-                    badges[i].Size = new Size(bw[i], Ui.S(24, s));
+                    badges[i].Location = new Point(bx, (sbH - badgeH) / 2);
+                    badges[i].Size = new Size(bw[i], badgeH);
                     bx += bw[i] + gap;
                 }
                 _btnRefreshNow.Font = fUi;
@@ -1903,19 +1919,17 @@ namespace OpenMIFS
                 _btnElevate.Font = fUi;
                 _btnElevate.Size = new Size(Ui.S(112, s), Ui.S(26, s));
                 _btnElevate.Location = new Point(W - Ui.S(226, s), Ui.S(7, s));
-                _lblClock.Font = f8;
-                _lblClock.Location = new Point(W - Ui.S(348, s), Ui.S(11, s));
-                _lblClock.Size = new Size(Ui.S(80, s), h8);
+
                 _barLine.Location = new Point(0, Ui.S(Ui.StatusBarH, s) - 1);
                 _barLine.Size = new Size(W, 1);
 
                 // ── 底部状态行：永远贴窗口底（偏好设置展开也不会压住它）
                 _chkAuto.Font = fUi;
                 _chkAuto.Location = new Point(X, bottomY);
-                _chkAuto.Size = new Size(Ui.S(92, s), Ui.S(22, s));
+                _chkAuto.Size = new Size(Ui.S(92, s), Math.Max(Ui.S(22, s), Ui.TextH(fUi, s)));
                 _cmbInterval.Font = fUi;
                 _cmbInterval.Location = new Point(X + Ui.S(96, s), bottomY - Ui.S(1, s));
-                _cmbInterval.Size = new Size(Ui.S(70, s), Ui.S(22, s));
+                _cmbInterval.Size = new Size(Ui.S(70, s), Math.Max(Ui.S(22, s), Ui.TextH(fUi, s)));
                 _lblSensorHint.Font = f8;
                 _lblSensorHint.Location = new Point(X + Ui.S(176, s), bottomY + Ui.S(2, s));
                 _lblSensorHint.Size = new Size(W - X - Ui.S(188, s), h8);
@@ -1929,8 +1943,9 @@ namespace OpenMIFS
                 y = LayoutNote(_lblModeNote, X, leftW, y, s, f8);
 
                 y = LayoutTitle(_secSw, X, leftW, y, s, fBold);
-                Place(_chkFn, X, y + Ui.S(2, s), Ui.S(150, s), Ui.S(22, s), fUi);
-                Place(_chkTp, X + Ui.S(160, s), y + Ui.S(2, s), Ui.S(210, s), Ui.S(22, s), fUi);
+                int chkH = Math.Max(Ui.S(22, s), Ui.TextH(fUi, s));
+                Place(_chkFn, X, y + Ui.S(2, s), Ui.S(150, s), chkH, fUi);
+                Place(_chkTp, X + Ui.S(160, s), y + Ui.S(2, s), Ui.S(210, s), chkH, fUi);
                 y += Ui.S(30, s);
 
                 y = LayoutTitle(_secKbd, X, leftW, y, s, fBold);
@@ -1952,10 +1967,7 @@ namespace OpenMIFS
                 FlatButton[] ob = new FlatButton[] { _btnOsdRestart, _btnOsdDiag, _btnOsdDir, _btnRecap };
                 for (int i = 0; i < ob.Length; i++) Place(ob[i], X + i * (ow + gap), y, ow, ctrlH, fUi);
                 y += ctrlH + Ui.S(4, s);
-                Place(_chkStartup, X, y + Ui.S(2, s), Ui.S(300, s), Ui.S(22, s), fUi);
-                y += Ui.S(30, s);
-                Place(_chkDpi, X, y + Ui.S(2, s), Ui.S(250, s), Ui.S(22, s), fUi);
-                Place(_lblDpi, X + Ui.S(256, s), y + Ui.S(3, s), leftW - Ui.S(256, s), h8, f8);
+                Place(_chkStartup, X, y + Ui.S(2, s), Ui.S(300, s), chkH, fUi);
                 y += Ui.S(32, s);
 
                 // ── 偏好设置：面板高度自动收在底部状态行之上；内容放不下就内部滚动
@@ -1982,15 +1994,15 @@ namespace OpenMIFS
                 int innerW = rw - pad * 2 - 4;
                 int colW = innerW / 3;
                 int by = pad + Ui.S(4, s);
-                for (int i = 0; i < 3; i++) _big[i].Layout(pad + i * colW, by, colW, s, fBig, fUi, f8);
+                for (int i = 0; i < 3; i++) _big[i].Layout(pad + i * colW, by, colW, s, fBig, fUi, f8, fSub);
 
-                int ry = by + fBig.Height + Ui.S(30, s);
+                int ry = by + fBig.Height + Ui.S(46, s);   // 给"说明 + 副读数"两行留高度
                 _topLine.Location = new Point(pad, ry);
                 _topLine.Size = new Size(innerW, 1);
                 ry += Ui.S(10, s);
 
-                int[] rowStart = new int[] { 0, 2, 7 };
-                int[] rowCount = new int[] { 2, 5, 5 };
+                int[] rowStart = new int[] { 0, 3, 8 };
+                int[] rowCount = new int[] { 3, 5, 5 };
                 for (int c = 0; c < rowStart.Length; c++)
                 {
                     if (c > 0)
@@ -2005,7 +2017,7 @@ namespace OpenMIFS
                     ry += h8 + Ui.S(2, s);
                     for (int r = 0; r < rowCount[c]; r++)
                     {
-                        _rows[rowStart[c] + r].Layout(ry, innerW + 4, rowH, s, f8, fVal, f8);
+                        _rows[rowStart[c] + r].Layout(ry, innerW + 4, rowH, s, f8, fVal, fValSmall, f8);
                         ry += rowH;
                     }
                 }
@@ -2013,14 +2025,14 @@ namespace OpenMIFS
                 Place(_lblEnv, pad, rh - pad - h8 * 2 - Ui.S(4, s), innerW, h8, f8);
                 Place(_lblUnavail, pad, rh - pad - h8, innerW, h8, f8);
             }
-            finally { _layoutBusy = false; }
+            finally { _layoutBusy = false; ResumeRedraw(); }
         }
 
         private int LayoutTitle(SectionTitle t, int x, int w, int y, double s, Font f)
         {
             t.Font = f;
             t.Location = new Point(x, y);
-            t.Size = new Size(w, Ui.S(24, s));
+            t.Size = new Size(w, Math.Max(Ui.S(24, s), Ui.TextH(f, s)));
             return y + Ui.S(28, s);
         }
 
@@ -2035,7 +2047,8 @@ namespace OpenMIFS
 
         private static void Place(Control c, int x, int y, int w, int h, Font f)
         {
-            c.Font = f;
+            // 字体来自 Ui.F 缓存，同一实例不必重复赋值（赋值会触发 OnFontChanged → 布局+重画）
+            if (!object.ReferenceEquals(c.Font, f)) c.Font = f;
             c.Location = new Point(x, y);
             c.Size = new Size(w, h);
         }
@@ -2063,7 +2076,7 @@ namespace OpenMIFS
             _prefsOpen = !_prefsOpen;
             _btnPrefs.Text = (_prefsOpen ? "\u25BE 偏好设置" : "\u25B8 偏好设置");
             _btnPrefs.Selected = _prefsOpen;
-            LayoutAll();
+            LayoutAll(true);   // 必须强制：窗口尺寸没变，否则会被"尺寸没变就早退"挡掉（v0.6.2 的 bug）
             Log.Info("偏好设置：" + (_prefsOpen ? "展开" : "收起"));
         }
 
@@ -2089,28 +2102,43 @@ namespace OpenMIFS
             return null;
         }
 
-        /// <summary>温度类读数 → 档位（颜色之外还要给档位字，见 docs/UI-DESIGN.md §1.2）。</summary>
+        /// <summary>档位：温度走温度阈值，功耗走功耗阈值（与托盘图标共用同一套，可在偏好设置里改）。</summary>
         private static int LevelOf(Reading r)
         {
-            if (r == null || !r.Ok || r.Name.IndexOf("温度") < 0) return 0;
+            if (r == null || !r.Ok) return 0;
+            string kind = r.Name.IndexOf("温度") >= 0 ? "cput"
+                : (r.Name.IndexOf("功耗") >= 0 ? "cpup"
+                : (r.Name.IndexOf("负载") >= 0 ? "cpul" : ""));   // CPU 负载也按阈值变色（cpul 阈值可在偏好设置改）
+            if (kind.Length == 0) return 0;
             string v, u;
             Ui.SplitUnit(r.Value, out v, out u);
             double d;
             if (!double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) return 0;
-            return Ui.LevelFor(d);
+            return LevelOfKind(kind, d);
         }
 
-        private static void ApplyBig(BigReadout b, List<Reading> list, string name, string caption, bool isTemp)
+        /// <summary>按指标取档位（1~4）；kind 为空表示不变色。</summary>
+        private static int LevelOfKind(string kind, double d)
+        {
+            double[] th = TrayIcon.ThresholdsOf(kind);
+            int lv = 1;
+            if (d >= th[0]) lv = 2;
+            if (d >= th[1]) lv = 3;
+            if (d >= th[2]) lv = 4;
+            return lv;
+        }
+
+        private static void ApplyBig(BigReadout b, List<Reading> list, string name, string caption, string kind)
         {
             Reading r = FindReading(list, name);
             if (r == null || !r.Ok) { b.Set("", "", caption, 0, false); return; }
             string v, u;
             Ui.SplitUnit(Ui.Tidy(r.Value), out v, out u);
             int lv = 0;
-            if (isTemp)
+            if (kind.Length > 0)
             {
                 double d;
-                if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) lv = Ui.LevelFor(d);
+                if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) lv = LevelOfKind(kind, d);
             }
             b.Set(v, u, caption, lv, true);
         }
@@ -2326,10 +2354,11 @@ namespace OpenMIFS
                             _lblSensorHint.Text = "读取失败：" + err + "（详见日志）";
                             return;
                         }
-                        ApplyBig(_big[0], list, "CPU 温度", "温度", true);
-                        ApplyBig(_big[1], list, "CPU 功耗", "功耗", false);
+                        ApplyBig(_big[0], list, "CPU 温度", "温度", "cput");
+                        ApplyBig(_big[1], list, "CPU 功耗", "功耗", "cpup");   // 功耗也按阈值变色（与温度同规则）
                         for (int i = 0; i < _rowNames.Count; i++)
                         {
+                            if (_rowNames[i] == "风扇2") continue;   // 这一行由 RefreshAll 用 MIFS 的转速喂，别被传感器刷成 —
                             Reading r = FindReading(list, _rowNames[i]);
                             if (r == null) { _rows[i].Set("—", "", false, 0); continue; }
                             if (!r.Ok)
@@ -2340,9 +2369,10 @@ namespace OpenMIFS
                                     r.Name + " 不可用" + (r.Note.Length > 0 ? "：" + r.Note : "") + "（" + r.Group + "）");
                                 continue;
                             }
-                            _rows[i].Set(Ui.Tidy(r.Value), true, LevelOf(r));
-                            if (r.Note.Length > 0)
-                                _tips.SetToolTip(_rows[i].ValueLabel, r.Note + "（" + r.Group + "）");
+                            int lv = LevelOf(r);
+                            _rows[i].Set(Ui.Tidy(r.Value), true, lv);
+                            string tip = r.Note.Length > 0 ? r.Note + "（" + r.Group + "）" : r.Name;
+                            _tips.SetToolTip(_rows[i].ValueLabel, tip);
                         }
                         _lblEnv.Text = "读数 " + ok.ToString(CultureInfo.InvariantCulture) + " / "
                             + (ok + fail).ToString(CultureInfo.InvariantCulture) + " 项可用";
@@ -2592,59 +2622,7 @@ namespace OpenMIFS
             finally { Cursor = Cursors.Default; }
         }
 
-        private void OnDpiFixClick(object sender, EventArgs e)
-        {
-            if (_suppress) return;
-            bool want = _chkDpi.Checked;
-            if (!OsdDpi.FileExists)
-            {
-                Warn("找不到 " + OsdDpi.ExePath + "，官方 OSD 组件没装，无法应用这个修复。");
-                RefreshDpiState();
-                return;
-            }
-            string tip = want
-                ? "将写入注册表（需要管理员，可随时撤销）：\r\n  HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers\r\n  "
-                  + OsdDpi.ExePath + " = " + OsdDpi.FlagValue + "\r\n\r\n作用：让 DPI 不感知的 OSD 界面进程按系统 DPI 渲染。"
-                  + "\r\n\r\n已观察到本机缩放为 125%，而该进程按 96 DPI 工作 —— 这是它画不出提示的头号嫌疑。\r\n继续？"
-                : "将删除上面那条注册表值，把 OSD 恢复原样。继续？";
-            if (MessageBox.Show(this, tip, want ? "应用 DPI 兼容修复" : "撤销 DPI 兼容修复",
-                    MessageBoxButtons.OKCancel, want ? MessageBoxIcon.Warning : MessageBoxIcon.Question) != DialogResult.OK)
-            {
-                Log.Info("用户取消了 DPI 兼容修复操作");
-                RefreshDpiState();
-                return;
-            }
-            Cursor = Cursors.WaitCursor;
-            try
-            {
-                string result = OsdDpi.Apply(want);
-                RefreshDpiState();
-                MessageBox.Show(this,
-                    result + "\r\n\r\n下一步：在管理员 PowerShell 里重启 OSD 让新设置生效（或点「重启 OSD」按钮），"
-                    + "然后按一次 Fn 组合键看提示是否出现。\r\n\r\n日志：" + Log.FilePath,
-                    "DPI 兼容修复", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                if (want) ShowOsd("OSD DPI 兼容修复 · 已写入");
-            }
-            catch (Exception ex) { Log.Ex("DPI 兼容修复失败", ex); Warn("操作失败：" + ex.Message); }
-            finally { Cursor = Cursors.Default; }
-        }
 
-        private void RefreshDpiState()
-        {
-            bool prev = _suppress;
-            _suppress = true;
-            try
-            {
-                bool on = OsdDpi.IsEnabled();
-                _chkDpi.Checked = on;
-                _chkDpi.Enabled = OsdDpi.FileExists;
-                _lblDpi.Text = !OsdDpi.FileExists ? "（未安装官方 OSD）"
-                    : (on ? "已应用 ~ HIGHDPIAWARE" : "未应用");
-                _lblDpi.ForeColor = on ? Ui.Cold : Ui.Muted;
-            }
-            catch (Exception ex) { Log.Ex("刷新 DPI 修复状态失败", ex); }
-            _suppress = prev;
-        }
 
         private void OnOsdDiagClick(object sender, EventArgs e)
         {
@@ -2719,7 +2697,6 @@ namespace OpenMIFS
             Osd.State s = Osd.Query();
             _osdOk = Osd.Healthy(s);
             _osdStatus = _osdOk ? "正常" : Osd.StatusLine(s);
-            RefreshDpiState();
         }
 
         public void RefreshAll()
@@ -2763,15 +2740,19 @@ namespace OpenMIFS
             if (fans != null)
             {
                 anyOk = true;
-                string cap = "风扇1";
-                if (fans[1] > 0) cap = "风扇1（风扇2 " + fans[1].ToString(CultureInfo.InvariantCulture) + "）";
-                _big[2].Set(fans[0].ToString(CultureInfo.InvariantCulture), "RPM", cap, 0, true);
+                // 关键读数只放风扇1（一列一个头条数字）；风扇2 作为明细行显示在下面
+                bool twoFans = fans[1] > 0;
+                _big[2].Set(fans[0].ToString(CultureInfo.InvariantCulture), "RPM", twoFans ? "风扇1" : "风扇", 0, true);
+                _big[2].Sub("");
+                _rows[0].Set(twoFans ? fans[1].ToString(CultureInfo.InvariantCulture) : "—", "RPM", twoFans, 0);
                 snap.AppendLine("风扇1        : " + fans[0].ToString(CultureInfo.InvariantCulture) + " RPM");
                 if (fans[1] > 0) snap.AppendLine("风扇2        : " + fans[1].ToString(CultureInfo.InvariantCulture) + " RPM");
             }
             else
             {
                 _big[2].Set("", "", "风扇", 0, false);
+                _big[2].Sub("");
+                _rows[0].Set("—", "", false, 0);
                 unavailable.Add("风扇转速");
                 snap.AppendLine("风扇转速     : 未实现");
             }
@@ -2873,7 +2854,6 @@ namespace OpenMIFS
             }
 
             // ── 状态条右侧：时间；未提权时给一键提权重启
-            _lblClock.Text = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
             _btnElevate.Visible = !MifsApp.IsElevated;
             if (!anyOk)
             {
