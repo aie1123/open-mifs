@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.6.2.0")]
-[assembly: AssemblyFileVersion("0.6.2.0")]
+[assembly: AssemblyVersion("0.6.3.0")]
+[assembly: AssemblyFileVersion("0.6.3.0")]
 
 namespace OpenMIFS
 {
@@ -1179,11 +1179,16 @@ namespace OpenMIFS
         private readonly Label _lblTrayBudget = new Label();
         private readonly Label _lblTrayHint = new Label();
         private readonly FlatButton _btnTrayDefault = new FlatButton();
+        private readonly Label _lblTrayTitle = new Label();   // 偏好设置里的分组标题（托盘悬停提示）
+        private readonly Label _lblSwTitle = new Label();     // "档位颜色"标题
+        private readonly FlatButton _btnColorDefault = new FlatButton();   // 恢复默认档位颜色
+        private readonly CheckBox _chkColorRaw = new CheckBox();           // 面板数值用原色
         private readonly Label _lblTrayIcon = new Label();
         private readonly ComboBox _cmbTrayIcon = new ComboBox();
         private readonly Label _lblTrayTh = new Label();
         private readonly NumericUpDown[] _numTrayTh = new NumericUpDown[] { new NumericUpDown(), new NumericUpDown(), new NumericUpDown() };
         private readonly FlatButton _btnSensorProbe = new FlatButton();
+        private readonly Label[] _swLevel = new Label[] { new Label(), new Label(), new Label(), new Label() };   // 档位色块（点开系统调色盘）
 
         // ── 布局缩放与状态
         private Panel _barLine;
@@ -1205,12 +1210,13 @@ namespace OpenMIFS
         private const int WM_SETREDRAW = 0x000B;
 
         /// <summary>拖动改变大小时挂起重绘：几千次子控件尺寸变更只换来一次重画。</summary>
-        private void SuspendRedraw() { try { SendMessage(Handle, WM_SETREDRAW, 0, 0); } catch { } }
-        private void ResumeRedraw() { try { SendMessage(Handle, WM_SETREDRAW, 1, 0); Invalidate(true); } catch { } }
+        private void SuspendRedraw() { try { if (IsHandleCreated && Visible) SendMessage(Handle, WM_SETREDRAW, 0, 0); } catch { } }
+        private void ResumeRedraw() { try { if (IsHandleCreated && Visible) { SendMessage(Handle, WM_SETREDRAW, 1, 0); Invalidate(true); } } catch { } }
 
         /// <summary>尺寸变化 → 攒 45ms 再重排一次（拖动时每秒上百个 Resize 事件只算一次）。</summary>
         private void QueueLayout()
         {
+            if (!Visible) return;          // 隐藏态不需要重排（也避免句柄重建期间碰 Handle）
             _layoutDirty = true;
             if (!_layoutTimer.Enabled) _layoutTimer.Start();
         }
@@ -1271,6 +1277,7 @@ namespace OpenMIFS
         private int _acTypeNow = -1;
         private int _fanRpmBefore = -1;
         private bool _mifsTempPowerChecked;
+        private int _lastFanCount = -1;
         private bool _trayUiSync;
         private bool _visibilityBusy;     // HideToTray/Restore 互斥，防止与 Resize 互递归
         private bool _suppress;
@@ -1303,7 +1310,7 @@ namespace OpenMIFS
             // 否则 125%/150% DPI 下会被二次放大 → 中文下缘被截断、偏好设置撑出窗口。
             AutoScaleMode = AutoScaleMode.None;
             DoubleBuffered = true;              // 自绘控件 + 频繁重排：不双缓冲会闪
-            ClientSize = new Size(940, 860);
+            ClientSize = new Size(940, 920);   // 加高：展开偏好设置时一屏放下，不出滚动条
             MinimumSize = new Size(720, 600);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.Sizable;   // 可拖动缩放：右列数据区跟着窗口变大
@@ -1313,6 +1320,7 @@ namespace OpenMIFS
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
             catch { }
 
+            Ui.LoadColors();      // 档位颜色（settings.txt: color_l1..color_l4）
             BuildUi();
             LayoutAll(true);
             // 自动刷新：默认开（用户可关，选择记进 settings.txt）
@@ -1343,6 +1351,7 @@ namespace OpenMIFS
             TrayIcon.LoadThresholds();
             SyncTrayUi();
             RefreshTrayThresholdRow();
+            RefreshSwatches();
 
             _osdHintMode = Settings.Get("osd_hint", "auto");
             _hintTimer.Interval = 350;   // 等官方 OSD 先画出来再决定要不要显示自带的
@@ -1407,8 +1416,12 @@ namespace OpenMIFS
 
         private void HideToTrayCore()
         {
+            // 直接 Hide() 即可：隐藏的窗口本来就不会有任务栏按钮，不需要（也不应该）动 ShowInTaskbar。
+            // 踩过的两个坑都在改 ShowInTaskbar 上：
+            //   ① 可见状态下改它 → Windows 先播放"任务栏按钮移除/窗口缩走"的动画，看起来是"卡一下才消失"
+            //   ② Hide() 之后再改它 → 句柄重建，存在把窗口显示回来的窗口期（点 X 后窗口自己弹回来）
             Hide();
-            ShowInTaskbar = false;
+            Visible = false;                       // 断言一次，防止任何异步路径把可见性带回来
             // 关键：把 WindowState 归位。否则 Resize 的判定条件（== Minimized）会一直为真，
             // 任何一次重新布局都会再次调用 HideToTray，进而在句柄重建时无限递归。
             if (WindowState != FormWindowState.Normal) WindowState = FormWindowState.Normal;
@@ -1726,7 +1739,7 @@ namespace OpenMIFS
             Controls.Add(_btnPrefs);
 
             _pnlPrefs.BackColor = Ui.Surface;
-            _pnlPrefs.AutoScroll = true;
+            _pnlPrefs.AutoScroll = false;      // 不要滚动条：内容宽度=面板宽度，一旦出现竖条就会连带出横条并挤掉左侧标签
             Controls.Add(_pnlPrefs);
             BuildPrefsUi();
 
@@ -1743,9 +1756,9 @@ namespace OpenMIFS
             string[] cluster = new string[] { "热与功耗", "频率与负载", "存储与电池" };
             string[][] clusterRows = new string[][]
             {
-                new string[] { "风扇2", "GPU 温度", "GPU 功耗" },   // 风扇2 走 MIFS（RefreshAll 供数），不是传感器项
+                new string[] { "风扇2", "风扇3", "GPU 温度", "GPU 功耗" },   // 风扇行走 MIFS（RefreshAll 供数），按实际路数显隐
                 new string[] { "CPU 频率", "CPU 负载", "GPU 利用率", "GPU 频率", "GPU 显存" },
-                new string[] { "内存占用", "内存规格", "磁盘温度", "磁盘", "电池" }
+                new string[] { "内存占用", "内存规格", "磁盘温度", "磁盘", "磁盘2 温度", "磁盘2", "磁盘3 温度", "磁盘3", "电池" }
             };
             for (int c = 0; c < cluster.Length; c++)
             {
@@ -1766,6 +1779,11 @@ namespace OpenMIFS
                     _rowNames.Add(clusterRows[c][r]);
                 }
             }
+
+            // 多硬盘槽位默认隐藏：单盘机器不该看到空行
+            for (int i = 0; i < _rowNames.Count; i++)
+                if (_rowNames[i].StartsWith("磁盘2", StringComparison.Ordinal) || _rowNames[i].StartsWith("磁盘3", StringComparison.Ordinal))
+                    _rows[i].Visible = false;
 
             _lblEnv.AutoSize = false;
             _lblEnv.BackColor = Color.Transparent;
@@ -1799,8 +1817,21 @@ namespace OpenMIFS
         /// <summary>偏好设置区（折叠内容）：托盘提示 + 图标阈值 + 数据源探测。</summary>
         private void BuildPrefsUi()
         {
+            _lblTrayTitle.AutoSize = false;
+            _lblTrayTitle.Text = "托盘悬停提示";
+            _lblTrayTitle.ForeColor = Ui.Ink;
+            _lblTrayTitle.TextAlign = ContentAlignment.MiddleLeft;
+            _pnlPrefs.Controls.Add(_lblTrayTitle);
+
+            _lblSwTitle.AutoSize = false;
+            _lblSwTitle.Text = "档位颜色";
+            _lblSwTitle.ForeColor = Ui.Ink;
+            _lblSwTitle.TextAlign = ContentAlignment.MiddleLeft;
+            _pnlPrefs.Controls.Add(_lblSwTitle);
+
             _lstTray.CheckOnClick = true;
             _lstTray.IntegralHeight = false;
+            _lstTray.MultiColumn = false;       // 竖排（横排观感更差，且列表内会出现横向滚动条）
             _lstTray.TabIndex = 61;
             _lstTray.AccessibleName = "托盘悬停提示包含的项目";
             _lstTray.ItemCheck += OnTrayItemCheck;
@@ -1859,6 +1890,7 @@ namespace OpenMIFS
 
             _lblTrayHint.AutoSize = false;
             _lblTrayHint.ForeColor = Ui.Label;
+            _tips.SetToolTip(_lblTrayHint, "档位颜色可在下方「档位颜色」色块里自定义：点色块开调色盘（RGB / 十六进制），右键选预设色");
             _lblTrayHint.TextAlign = ContentAlignment.MiddleLeft;
             _pnlPrefs.Controls.Add(_lblTrayHint);
 
@@ -1867,6 +1899,118 @@ namespace OpenMIFS
             _btnSensorProbe.AccessibleName = "探测传感器数据源";
             _btnSensorProbe.Click += OnSensorProbeClick;
             _pnlPrefs.Controls.Add(_btnSensorProbe);
+
+            _btnColorDefault.Text = "恢复默认色";
+            _btnColorDefault.AccessibleName = "四个档位颜色恢复默认";
+            _btnColorDefault.Click += OnColorDefaultClick;
+            _pnlPrefs.Controls.Add(_btnColorDefault);
+
+            _chkColorRaw.Text = "面板数值用配置原色";
+            _chkColorRaw.ForeColor = Ui.Ink;
+            _chkColorRaw.FlatStyle = FlatStyle.System;
+            _chkColorRaw.AccessibleName = "面板数值使用配置的原色（不勾选则自动加深以保证可读）";
+            _tips.SetToolTip(_chkColorRaw, "勾选：面板数值完全用你在上方「档位颜色」里配置的颜色；\r\n不勾（默认）：颜色过浅时自动加深，保证在白底上读得清");
+            _chkColorRaw.Click += delegate
+            {
+                Ui.SetRawColors(_chkColorRaw.Checked);    // 勾选 = 用配置原色（不做加深）
+                Invalidate(true);
+                if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);
+                ForceSensorRefresh();
+                RefreshAll();
+            };
+            _pnlPrefs.Controls.Add(_chkColorRaw);
+
+            // ── 档位颜色：4 个色块（点击开系统调色盘；右键给预设色）
+            for (int i = 0; i < 4; i++)
+            {
+                Label lb = _swLevel[i];
+                lb.AutoSize = false;
+                lb.BorderStyle = BorderStyle.FixedSingle;
+                lb.TextAlign = ContentAlignment.MiddleCenter;
+                lb.Cursor = Cursors.Hand;
+                lb.Font = Ui.FontUi;
+                lb.Tag = i + 1;
+                lb.AccessibleName = "档位颜色 " + Ui.LevelWord(i + 1) + "（点击自定义）";
+                lb.Click += OnSwatchClick;
+                ContextMenuStrip pm = new ContextMenuStrip();
+                for (int k = 0; k < Ui.LevelPresets.Length; k++)
+                {
+                    ToolStripMenuItem mi = new ToolStripMenuItem(Ui.LevelWord(k + 1) + "　" + Ui.HexOf(Ui.LevelPresets[k]));
+                    mi.Tag = (i + 1).ToString(CultureInfo.InvariantCulture) + ":" + k.ToString(CultureInfo.InvariantCulture);
+                    mi.Click += OnPresetClick;
+                    pm.Items.Add(mi);
+                }
+                lb.ContextMenuStrip = pm;
+                _tips.SetToolTip(lb, "点击自定义颜色（RGB / 十六进制调色盘）；右键选预设色");
+                _pnlPrefs.Controls.Add(lb);
+            }
+        }
+
+        /// <summary>档位色块刷新：背景 = 配置色，字色按对比度自动反色（浅色用深字）。</summary>
+        private void RefreshSwatches()
+        {
+            for (int i = 0; i < _swLevel.Length; i++)
+            {
+                Color c = Ui.LevelColor(i + 1);
+                _swLevel[i].BackColor = c;
+                _swLevel[i].ForeColor = Ui.IconTextColor(c);
+                _swLevel[i].Text = Ui.LevelWord(i + 1);
+                _tips.SetToolTip(_swLevel[i], Ui.LevelWord(i + 1) + "　" + Ui.HexOf(c) + "　（点击自定义 / 右键选预设）");
+            }
+            _chkColorRaw.Checked = Ui.RawColors;      // 勾选态 = 用配置原色
+        }
+
+        /// <summary>立刻重读传感器：改颜色/改档位后不必等 2 秒节流，面板立刻换色。</summary>
+        private void ForceSensorRefresh()
+        {
+            _lastSensorRefresh = DateTime.MinValue;
+            RefreshSensors();
+        }
+
+        /// <summary>四个档位颜色一键恢复默认（绿/琥珀/橙/红）。</summary>
+        private void OnColorDefaultClick(object sender, EventArgs e)
+        {
+            Ui.ResetColors();
+            RefreshSwatches();
+            Invalidate(true);
+            if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);
+            RefreshAll();
+        }
+
+        /// <summary>点色块 → 系统调色盘（自带 RGB/HSL 滑杆 + 十六进制输入 + 自定义色格）。</summary>
+        private void OnSwatchClick(object sender, EventArgs e)
+        {
+            Label lb = sender as Label;
+            if (lb == null) return;
+            int level = (int)lb.Tag;
+            using (ColorDialog d = new ColorDialog())
+            {
+                d.FullOpen = true;                     // 直接展开调色盘（含 RGB/十六进制输入）
+                d.AnyColor = true;
+                d.Color = Ui.LevelColor(level);
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                Ui.SaveColor(level, d.Color);
+                RefreshSwatches();
+                Invalidate(true);
+                if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);
+                ForceSensorRefresh();
+                RefreshAll();
+            }
+        }
+
+        /// <summary>右键预设色（Tag = "档位:预设索引"）。</summary>
+        private void OnPresetClick(object sender, EventArgs e)
+        {
+            ToolStripMenuItem mi = sender as ToolStripMenuItem;
+            if (mi == null) return;
+            string[] p = ((string)mi.Tag).Split(':');
+            int level = int.Parse(p[0], CultureInfo.InvariantCulture);
+            int idx = int.Parse(p[1], CultureInfo.InvariantCulture);
+            Ui.SaveColor(level, Ui.LevelPresets[idx]);
+            RefreshSwatches();
+            Invalidate(true);
+            if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);
+            RefreshAll();
         }
 
         // ────────────────────────────────────────────────────── 几何重排
@@ -1973,14 +2117,14 @@ namespace OpenMIFS
                 // ── 偏好设置：面板高度自动收在底部状态行之上；内容放不下就内部滚动
                 Place(_btnPrefs, X, y, leftW, ctrlH, fUi);
                 y += ctrlH + Ui.S(4, s);
-                int prefsH = Ui.S(252, s);
+                int prefsH = Ui.S(300, s);        // 内容底约 296（含底部按钮行），留 4px 余量
                 int room = bottomY - y - gap;
                 if (prefsH > room) prefsH = room;
                 if (prefsH < Ui.S(80, s)) prefsH = Ui.S(80, s);
                 _pnlPrefs.Location = new Point(X, y);
                 _pnlPrefs.Size = new Size(leftW, prefsH);
                 _pnlPrefs.Visible = _prefsOpen;
-                LayoutPrefs(s);
+                LayoutPrefs(s, leftW);
 
                 // ── 右列：读数面板
                 int rx = X + leftW + Ui.S(12, s);
@@ -2001,8 +2145,8 @@ namespace OpenMIFS
                 _topLine.Size = new Size(innerW, 1);
                 ry += Ui.S(10, s);
 
-                int[] rowStart = new int[] { 0, 3, 8 };
-                int[] rowCount = new int[] { 3, 5, 5 };
+                int[] rowStart = new int[] { 0, 4, 9 };
+                int[] rowCount = new int[] { 4, 5, 9 };
                 for (int c = 0; c < rowStart.Length; c++)
                 {
                     if (c > 0)
@@ -2017,7 +2161,9 @@ namespace OpenMIFS
                     ry += h8 + Ui.S(2, s);
                     for (int r = 0; r < rowCount[c]; r++)
                     {
-                        _rows[rowStart[c] + r].Layout(ry, innerW + 4, rowH, s, f8, fVal, fValSmall, f8);
+                        ReadoutRow row = _rows[rowStart[c] + r];
+                        if (!row.Visible) continue;          // 隐藏行不占位，下面的行顶上来（单风扇/单盘机型不出空行）
+                        row.Layout(ry, innerW + 4, rowH, s, f8, fVal, fValSmall, f8);
                         ry += rowH;
                     }
                 }
@@ -2053,33 +2199,99 @@ namespace OpenMIFS
             c.Size = new Size(w, h);
         }
 
-        private void LayoutPrefs(double s)
+        /// <summary>
+        /// 偏好设置内的排版。设计宽 456 / 高约 214（面板高 252 时留 38px 余量）：
+        ///   0    标题「托盘悬停提示」
+        ///   18   勾选列表（两列） ｜ 预览
+        ///   100  字数 ｜ 恢复默认
+        ///   112  图标显示 ｜ 变色阈值 + 三个数值框
+        ///   140  四个档位色块
+        ///   168  阈值说明（**独占整行**，之前放在色块右边导致横向溢出 + 横向滚动条）
+        ///   190  探测数据源
+        /// </summary>
+        /// <summary>
+        /// 偏好设置排版（设计宽 456，内容底 ≈258；面板高 277 时留 19px 余量）：
+        ///   0    标题「托盘悬停提示」
+        ///   22   勾选列表（竖排，8 项全显示）｜ 预览 + 字数 + 恢复默认
+        ///   182  图标显示 + 变色阈值
+        ///   210  「档位颜色」+ 四个色块 + 探测数据源
+        ///   240  阈值说明（整行，档位词与色块一致）
+        /// </summary>
+        /// <summary>
+        /// 偏好设置排版（方案 A 的核心：**宽度全部按面板实际宽度算**，绝不写死，因而不可能横向溢出）。
+        /// 竖向按设计值等比缩放，面板高度由 LayoutAll 给足（272 设计单位 > 内容 258），所以不需要滚动条。
+        ///   0    标题「托盘悬停提示」
+        ///   22   勾选列表（竖排 8 项）｜ 预览 + 字数 + 恢复默认
+        ///   182  图标显示 + 变色阈值（combo 吃掉剩余宽度）
+        ///   212  「档位颜色」+ 四色块 + 探测数据源
+        ///   242  阈值说明（整行）
+        /// </summary>
+        private void LayoutPrefs(double s, int panelW)
         {
             Font fUi = Ui.F(9F, false, false, s), f8 = Ui.F(8F, false, false, s);
-            int h8 = Ui.TextH(f8, s);
-            int listW = Ui.S(196, s), listH = Ui.S(146, s), colX = listW + Ui.S(Ui.Gap, s);
-            Place(_lstTray, 0, 0, listW, listH, fUi);
-            Place(_lblTrayPreview, colX, 0, Ui.S(228, s), Ui.S(84, s), f8);
-            Place(_lblTrayBudget, colX, Ui.S(88, s), Ui.S(228, s), h8, f8);
-            Place(_btnTrayDefault, colX, Ui.S(110, s), Ui.S(104, s), Ui.S(26, s), fUi);
-            int rowY = listH + Ui.S(12, s);
-            Place(_lblTrayIcon, 0, rowY, Ui.S(72, s), h8, f8);
-            Place(_cmbTrayIcon, Ui.S(76, s), rowY - Ui.S(2, s), Ui.S(140, s), Ui.S(22, s), fUi);
-            Place(_lblTrayTh, Ui.S(222, s), rowY, Ui.S(68, s), h8, f8);
+            int h8 = Ui.TextH(f8, s), gap = Ui.S(Ui.Gap, s);
+            int cw = panelW - Ui.S(2, s);                 // 扣掉面板边框
+            if (cw < Ui.S(200, s)) cw = Ui.S(200, s);
+
+            Place(_lblTrayTitle, 0, 0, cw, Ui.TextH(fUi, s), fUi);
+
+            // ── 左：勾选列表（竖排）  右：预览 + 字数 + 恢复默认
+            int listW = Math.Min(Ui.S(196, s), cw * 45 / 100);
+            int listH = Ui.S(152, s);
+            Place(_lstTray, 0, Ui.S(22, s), listW, listH, fUi);
+            int rx = listW + gap, rw = cw - rx;
+            int btnW = Ui.S(100, s);
+            if (rw < Ui.S(140, s)) rw = Ui.S(140, s);
+            Place(_lblTrayPreview, rx, Ui.S(22, s), rw, listH - Ui.S(52, s), f8);
+            Place(_lblTrayBudget, rx, Ui.S(22, s) + listH - Ui.S(44, s), Math.Max(Ui.S(60, s), rw - btnW - gap), h8, f8);
+            Place(_btnTrayDefault, cw - btnW, Ui.S(22, s) + listH - Ui.S(38, s), btnW, Ui.S(24, s), fUi);
+
+            // ── 图标显示 + 变色阈值（同一行；combo 宽度吃剩余空间，右侧三个数值框贴右）
+            int y = Ui.S(182, s);
+            int spW = Ui.S(44, s), spGap = Ui.S(6, s);
+            int spTotal = 3 * spW + 2 * spGap;
+            // 标签宽度按文字实测：写死 60px 在 125% DPI + 缩放后会吃掉第 4 个字（"图标显"/"变色阈"）
+            int iconLabelW = TextRenderer.MeasureText("图标显示", f8,
+                new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width + Ui.S(6, s);
+            int thLabelW = TextRenderer.MeasureText("变色阈值", f8,
+                new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width + Ui.S(6, s);
+            int thX = cw - spTotal - thLabelW - gap;            // 「变色阈值 + 三个数值框」整体右对齐
+            int comboX = iconLabelW + gap;
+            int comboW = thX - gap - comboX;
+            if (comboW < Ui.S(80, s)) comboW = Ui.S(80, s);
+            Place(_lblTrayIcon, 0, y + Ui.S(3, s), iconLabelW, h8, f8);
+            Place(_cmbTrayIcon, comboX, y, comboW, Ui.S(22, s), fUi);
+            Place(_lblTrayTh, thX, y + Ui.S(3, s), thLabelW, h8, f8);
             for (int i = 0; i < 3; i++)
-                Place(_numTrayTh[i], Ui.S(292, s) + i * Ui.S(50, s), rowY - Ui.S(2, s), Ui.S(46, s), Ui.S(22, s), fUi);
-            Place(_lblTrayHint, 0, rowY + h8 + Ui.S(6, s), Ui.S(432, s), h8, f8);
-            Place(_btnSensorProbe, 0, rowY + h8 * 2 + Ui.S(10, s), Ui.S(104, s), Ui.S(26, s), fUi);
+                Place(_numTrayTh[i], thX + thLabelW + gap + i * (spW + spGap), y, spW, Ui.S(22, s), fUi);
+
+            // ── 档位颜色：标题 + 四个色块（左） ｜ 探测数据源（右）
+            y = Ui.S(212, s);
+            int swW = Ui.S(42, s), swGap = Ui.S(6, s);
+            Place(_lblSwTitle, 0, y + Ui.S(2, s), Ui.S(68, s), h8, f8);
+            for (int i = 0; i < _swLevel.Length; i++)
+                Place(_swLevel[i], Ui.S(70, s) + i * (swW + swGap), y, swW, Ui.S(22, s), fUi);
+            // ── 阈值说明：独占整行
+            Place(_lblTrayHint, 0, Ui.S(242, s), cw, h8, f8);
+
+            // ── 底部一行两个按钮
+            int by = Ui.S(272, s);
+            Place(_btnColorDefault, 0, by, Ui.S(100, s), Ui.S(24, s), fUi);
+            Place(_btnSensorProbe, Ui.S(108, s), by, Ui.S(100, s), Ui.S(24, s), fUi);
+            Place(_chkColorRaw, Ui.S(216, s), by + Ui.S(1, s), cw - Ui.S(216, s),
+                Math.Max(Ui.S(22, s), Ui.TextH(fUi, s)), fUi);
         }
+
+        /// <summary>「变色阈值」标签的预留宽度。</summary>
+        private static int spLabel_Reserve(double s) { return Ui.S(60, s) + Ui.S(8, s); }        /// <summary>展开/收起偏好设置。必须强制重排：窗口尺寸没变，否则会被"尺寸没变就早退"挡掉。</summary>
         private void TogglePrefs()
         {
             _prefsOpen = !_prefsOpen;
             _btnPrefs.Text = (_prefsOpen ? "\u25BE 偏好设置" : "\u25B8 偏好设置");
             _btnPrefs.Selected = _prefsOpen;
-            LayoutAll(true);   // 必须强制：窗口尺寸没变，否则会被"尺寸没变就早退"挡掉（v0.6.2 的 bug）
+            LayoutAll(true);
             Log.Info("偏好设置：" + (_prefsOpen ? "展开" : "收起"));
         }
-
         /// <summary>未提权时的一键提权重启（状态条右侧）。</summary>
         private void OnElevateClick(object sender, EventArgs e)
         {
@@ -2094,7 +2306,6 @@ namespace OpenMIFS
             }
             catch (Exception ex) { Log.Ex("提权重启失败", ex); Warn("提权重启失败：" + ex.Message); }
         }
-
         // ────────────────────────────────────────────────────── 读数渲染辅助
         private static Reading FindReading(List<Reading> list, string name)
         {
@@ -2106,15 +2317,29 @@ namespace OpenMIFS
         private static int LevelOf(Reading r)
         {
             if (r == null || !r.Ok) return 0;
-            string kind = r.Name.IndexOf("温度") >= 0 ? "cput"
+            string kind = r.Name.IndexOf("温度") >= 0
+                    ? (r.Name.StartsWith("GPU", StringComparison.Ordinal) ? "gput" : "cput")
                 : (r.Name.IndexOf("功耗") >= 0 ? "cpup"
-                : (r.Name.IndexOf("负载") >= 0 ? "cpul" : ""));   // CPU 负载也按阈值变色（cpul 阈值可在偏好设置改）
+                : (r.Name.IndexOf("负载") >= 0 ? "cpul" : ""));   // GPU 温度走 gput 阈值，其余温度走 cput
             if (kind.Length == 0) return 0;
             string v, u;
             Ui.SplitUnit(r.Value, out v, out u);
             double d;
             if (!double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) return 0;
             return LevelOfKind(kind, d);
+        }
+
+        /// <summary>明细区的风扇行：该路不存在就整行隐藏（单风扇机型不该出现空行）。
+        /// 路数变化时补一次重排，让下面的行顶上来。</summary>
+        private void SetFanRow(int rowIndex, bool present, int rpm)
+        {
+            if (rowIndex >= _rows.Count) return;
+            ReadoutRow row = _rows[rowIndex];
+            bool changed = row.Visible != present;
+            row.Visible = present;
+            if (present)
+                row.Set(rpm.ToString(CultureInfo.InvariantCulture), "RPM", rpm > 0, 0);
+            if (changed) { _lastLayW = -1; QueueLayout(); }
         }
 
         /// <summary>按指标取档位（1~4）；kind 为空表示不变色。</summary>
@@ -2198,7 +2423,8 @@ namespace OpenMIFS
             if (i < 0 || i >= TrayIcon.Kinds.Length) return;
             TrayIcon.Save(TrayIcon.Kinds[i]);
             Log.Info("托盘图标：改为 " + TrayIcon.KindLabel() + "（" + TrayIcon.Kinds[i] + "）");
-            RefreshTrayThresholdRow();                                             // 阈值行跟随切换
+            RefreshTrayThresholdRow();
+            RefreshSwatches();                                             // 阈值行跟随切换
             if (TrayIconChanged != null) TrayIconChanged(this, EventArgs.Empty);   // 托盘立刻重画
         }
 
@@ -2261,8 +2487,9 @@ namespace OpenMIFS
             {
                 for (int i = 0; i < 3; i++)
                 {
-                    _numTrayTh[i].Minimum = kind == "cput" ? 20 : 1;
-                    _numTrayTh[i].Maximum = kind == "cput" ? 120 : (kind == "cpup" ? 150 : 100);
+                    bool isTempKind = kind == "cput" || kind == "gput";
+                    _numTrayTh[i].Minimum = isTempKind ? 20 : 1;
+                    _numTrayTh[i].Maximum = isTempKind ? 120 : (kind == "cpup" ? 150 : 100);
                     _numTrayTh[i].Increment = 1;
                     decimal v = (decimal)Math.Round(th[i]);
                     if (v < _numTrayTh[i].Minimum) v = _numTrayTh[i].Minimum;
@@ -2280,10 +2507,10 @@ namespace OpenMIFS
             string kind = TrayIcon.Kind;
             if (kind == "none") { _lblTrayHint.ForeColor = Color.FromArgb(110, 110, 116); _lblTrayHint.Text = "图标显示选「无」时不使用阈值。"; return; }
             double[] th = TrayIcon.ThresholdsOf(kind);
-            string unit = kind == "cput" ? "℃" : (kind == "cpup" ? "W" : "%");
+            string unit = (kind == "cput" || kind == "gput") ? "℃" : (kind == "cpup" ? "W" : "%");
             _lblTrayHint.ForeColor = Color.FromArgb(110, 110, 116);
-            _lblTrayHint.Text = TrayIcon.KindShort(kind) + "阈值（" + unit + "）：≤" + Fmt(th[0]) + " 绿 · ≤"
-                + Fmt(th[1]) + " 琥珀 · ≤" + Fmt(th[2]) + " 橙 · 更高红";
+            _lblTrayHint.Text = TrayIcon.KindFull(kind) + " 阈值（" + unit + "）：≤" + Fmt(th[0]) + " 凉 · ≤"
+                + Fmt(th[1]) + " 温 · ≤" + Fmt(th[2]) + " 热 · 更高烫";
         }
 
         private static string Fmt(double d)
@@ -2297,6 +2524,7 @@ namespace OpenMIFS
             TrayIcon.ResetThresholds();
             SyncTrayUi();
             RefreshTrayThresholdRow();
+            RefreshSwatches();
             Log.Info("托盘提示：已恢复默认显示项（版本 + 性能模式 + 风扇）");
         }
 
@@ -2358,8 +2586,23 @@ namespace OpenMIFS
                         ApplyBig(_big[1], list, "CPU 功耗", "功耗", "cpup");   // 功耗也按阈值变色（与温度同规则）
                         for (int i = 0; i < _rowNames.Count; i++)
                         {
-                            if (_rowNames[i] == "风扇2") continue;   // 这一行由 RefreshAll 用 MIFS 的转速喂，别被传感器刷成 —
+                            if (_rowNames[i] == "风扇2" || _rowNames[i] == "风扇3") continue;   // 风扇行由 RefreshAll 用 MIFS 喂数
                             Reading r = FindReading(list, _rowNames[i]);
+
+                            // 多硬盘槽位：这块盘不存在就整行隐藏（单盘机器看不到空行），存在才显示
+                            if (_rowNames[i].StartsWith("磁盘2", StringComparison.Ordinal)
+                                || _rowNames[i].StartsWith("磁盘3", StringComparison.Ordinal))
+                            {
+                                bool present = r != null && r.Ok;
+                                if (_rows[i].Visible != present)
+                                {
+                                    _rows[i].Visible = present;
+                                    _lastLayW = -1; QueueLayout();     // 可见性变了要重排，让下面的行顶上来
+                                }
+                                if (present) _rows[i].Set(Ui.Tidy(r.Value), true, 0);
+                                continue;
+                            }
+
                             if (r == null) { _rows[i].Set("—", "", false, 0); continue; }
                             if (!r.Ok)
                             {
@@ -2374,8 +2617,8 @@ namespace OpenMIFS
                             string tip = r.Note.Length > 0 ? r.Note + "（" + r.Group + "）" : r.Name;
                             _tips.SetToolTip(_rows[i].ValueLabel, tip);
                         }
-                        _lblEnv.Text = "读数 " + ok.ToString(CultureInfo.InvariantCulture) + " / "
-                            + (ok + fail).ToString(CultureInfo.InvariantCulture) + " 项可用";
+                        _lblEnv.Text = "";       // 已删除「读数 x / y 项可用」（用户要求）
+
                         _lblSensorHint.ForeColor = Ui.Label;
                         _lblSensorHint.Text = fail > 0
                             ? "有 " + fail.ToString(CultureInfo.InvariantCulture) + " 项未实现（读数区显示为 —）"
@@ -2740,19 +2983,33 @@ namespace OpenMIFS
             if (fans != null)
             {
                 anyOk = true;
-                // 关键读数只放风扇1（一列一个头条数字）；风扇2 作为明细行显示在下面
-                bool twoFans = fans[1] > 0;
-                _big[2].Set(fans[0].ToString(CultureInfo.InvariantCulture), "RPM", twoFans ? "风扇1" : "风扇", 0, true);
+                // 按实际非零路数自适应：1 路 → 关键读数说明写"风扇"、明细区不出现风扇行；
+                // 2 路 → 关键读数"风扇1" + 明细行"风扇2"；3 路 → 再补"风扇3"
+                int fanCount = 1;
+                if (fans[1] > 0) fanCount = 2;
+                if (fans.Length > 2 && fans[2] > 0) fanCount = 3;
+                _big[2].Set(fans[0].ToString(CultureInfo.InvariantCulture), "RPM", fanCount > 1 ? "风扇1" : "风扇", 0, true);
                 _big[2].Sub("");
-                _rows[0].Set(twoFans ? fans[1].ToString(CultureInfo.InvariantCulture) : "—", "RPM", twoFans, 0);
+                SetFanRow(0, fanCount >= 2, fans[1]);
+                SetFanRow(1, fanCount >= 3, fans.Length > 2 ? fans[2] : 0);
                 snap.AppendLine("风扇1        : " + fans[0].ToString(CultureInfo.InvariantCulture) + " RPM");
-                if (fans[1] > 0) snap.AppendLine("风扇2        : " + fans[1].ToString(CultureInfo.InvariantCulture) + " RPM");
+                if (fanCount >= 2) snap.AppendLine("风扇2        : " + fans[1].ToString(CultureInfo.InvariantCulture) + " RPM");
+                if (fanCount >= 3) snap.AppendLine("风扇3        : " + fans[2].ToString(CultureInfo.InvariantCulture) + " RPM");
+                if (fanCount != _lastFanCount)
+                {
+                    _lastFanCount = fanCount;
+                    Log.Info("风扇：" + fanCount.ToString(CultureInfo.InvariantCulture) + " 路（"
+                        + fans[0].ToString(CultureInfo.InvariantCulture) + "/"
+                        + fans[1].ToString(CultureInfo.InvariantCulture) + "/"
+                        + (fans.Length > 2 ? fans[2].ToString(CultureInfo.InvariantCulture) : "-") + " RPM）");
+                }
             }
             else
             {
                 _big[2].Set("", "", "风扇", 0, false);
                 _big[2].Sub("");
-                _rows[0].Set("—", "", false, 0);
+                SetFanRow(0, false, 0);
+                SetFanRow(1, false, 0);
                 unavailable.Add("风扇转速");
                 snap.AppendLine("风扇转速     : 未实现");
             }
@@ -2915,6 +3172,7 @@ namespace OpenMIFS
             new Item { Id = "cpup", Label = "CPU 功耗", Worst = 9,  Sample = "CPU 105.5W" },
             new Item { Id = "cpuf", Label = "CPU 频率", Worst = 9,  Sample = "CPU 5.55G" },
             new Item { Id = "cpul", Label = "CPU 负载", Worst = 7,  Sample = "CPU 100%" },
+            new Item { Id = "gput", Label = "GPU 温度", Worst = 8,  Sample = "GPU 105℃" },
             new Item { Id = "bat",  Label = "电池电量", Worst = 7,  Sample = "电池 100%" },
         };
 
@@ -3082,7 +3340,10 @@ namespace OpenMIFS
                 d.TryGetValue("风扇2", out f2);
                 double n1 = Num((f1 ?? "").Replace("RPM", "")), n2 = Num((f2 ?? "").Replace("RPM", ""));
                 if (!double.IsNaN(n1) && n1 > 0 && !double.IsNaN(n2) && n2 > 0)
-                    Put("fan", "风扇 " + n1.ToString("0", CultureInfo.InvariantCulture) + "/" + n2.ToString("0", CultureInfo.InvariantCulture));
+                    // 单风扇机型不要拼成 "风扇 3000/0"；三风扇只报前两路（提示总长有 62 字符上限）
+                    Put("fan", n2 > 0
+                        ? "风扇 " + n1.ToString("0", CultureInfo.InvariantCulture) + "/" + n2.ToString("0", CultureInfo.InvariantCulture)
+                        : "风扇 " + n1.ToString("0", CultureInfo.InvariantCulture));
                 else Put("fan", null);
 
                 SnapTime = DateTime.Now;
@@ -3102,6 +3363,11 @@ namespace OpenMIFS
                     Put("cput", "CPU " + v.Replace(" ", ""));
                 else Put("cput", null);
 
+                // GPU 温度也要进快照，否则托盘图标选 gput 时永远取不到值（v0.6.3 实测踩到）
+                string vg;
+                if (d.TryGetValue("GPU 温度", out vg) && !Bad(vg))
+                    Put("gput", "GPU " + vg.Replace(" ", ""));
+                else Put("gput", null);
                 if (d.TryGetValue("CPU 功耗", out v) && !Bad(v))
                 {
                     double w = Num(v.Replace("W", ""));
@@ -3200,16 +3466,18 @@ namespace OpenMIFS
         }
 
         /// <summary>可选数据源（id 与 TrayText 的项目 id 一致；none = 保持程序图标）。</summary>
-        public static readonly string[] Kinds = new string[] { "none", "cput", "cpup", "cpul" };
-        public static readonly string[] KindLabels = new string[] { "无（程序图标）", "CPU 温度", "CPU 功耗", "CPU 负载" };
+        public static readonly string[] Kinds = new string[] { "none", "cput", "cpup", "cpul", "gput" };
+        public static readonly string[] KindLabels = new string[] { "无（程序图标）", "CPU 温度", "CPU 功耗", "CPU 负载", "GPU 温度" };
 
         // 三档阈值可配置（settings.txt 里的 tray_icon_t / _p / _l，逗号分隔三个升序数值）
         private static double[] _tTemp = new double[] { 55, 70, 85 };
         private static double[] _tPower = new double[] { 15, 30, 45 };
         private static double[] _tLoad = new double[] { 25, 50, 80 };
+        private static double[] _tGpuTemp = new double[] { 60, 75, 88 };     // 核显比 CPU 低一档
         public static readonly double[] DefaultTemp = new double[] { 55, 70, 85 };
         public static readonly double[] DefaultPower = new double[] { 15, 30, 45 };
         public static readonly double[] DefaultLoad = new double[] { 25, 50, 80 };
+        public static readonly double[] DefaultGpuTemp = new double[] { 60, 75, 88 };
 
         private static string _kind = "cput";
         private static string _lastKey = "";
@@ -3272,7 +3540,8 @@ namespace OpenMIFS
             _tTemp = ParseThresholds("tray_icon_t", DefaultTemp);
             _tPower = ParseThresholds("tray_icon_p", DefaultPower);
             _tLoad = ParseThresholds("tray_icon_l", DefaultLoad);
-            Log.Info("托盘图标：变色阈值 温度=" + Text(_tTemp) + " 功耗=" + Text(_tPower) + " 负载=" + Text(_tLoad));
+            _tGpuTemp = ParseThresholds("tray_icon_gt", DefaultGpuTemp);
+            Log.Info("托盘图标：变色阈值 温度=" + Text(_tTemp) + " 功耗=" + Text(_tPower) + " 负载=" + Text(_tLoad) + " GPU温度=" + Text(_tGpuTemp));
         }
 
         private static string Text(double[] a)
@@ -3285,7 +3554,11 @@ namespace OpenMIFS
         /// <summary>指标短名（界面标签用）。</summary>
         public static string KindShort(string kind)
         {
-            return kind == "cput" ? "温度" : (kind == "cpup" ? "功耗" : (kind == "cpul" ? "负载" : "—"));
+            if (kind == "cput") return "温度";
+            if (kind == "cpup") return "功耗";
+            if (kind == "cpul") return "负载";
+            if (kind == "gput") return "GPU温";     // 阈值行标签短一点，"变色阈值 GPU温 [60][75][88]" 刚好
+            return "—";
         }
 
         /// <summary>把某个指标恢复成默认阈值。</summary>
@@ -3294,33 +3567,62 @@ namespace OpenMIFS
             if (kind == "cput") _tTemp = new double[] { DefaultTemp[0], DefaultTemp[1], DefaultTemp[2] };
             else if (kind == "cpup") _tPower = new double[] { DefaultPower[0], DefaultPower[1], DefaultPower[2] };
             else if (kind == "cpul") _tLoad = new double[] { DefaultLoad[0], DefaultLoad[1], DefaultLoad[2] };
+            else if (kind == "gput") _tGpuTemp = new double[] { DefaultGpuTemp[0], DefaultGpuTemp[1], DefaultGpuTemp[2] };
             else return;
-            try { Settings.Set(kind == "cput" ? "tray_icon_t" : (kind == "cpup" ? "tray_icon_p" : "tray_icon_l"), ThresholdText(kind)); }
+            try { Settings.Set(ThresholdKey(kind), ThresholdText(kind)); }
             catch (Exception ex) { Log.Ex("保存默认阈值失败", ex); }
         }
 
         /// <summary>取某个指标的当前阈值（副本，供界面生成动态说明）。</summary>
+        /// <summary>指标全名（说明行用，带 CPU/GPU 前缀）。</summary>
+        public static string KindFull(string kind)
+        {
+            if (kind == "cput") return "CPU 温度";
+            if (kind == "cpup") return "CPU 功耗";
+            if (kind == "cpul") return "CPU 负载";
+            if (kind == "gput") return "GPU 温度";
+            return "—";
+        }
+
+        /// <summary>取某个指标的阈值数组（内部引用，勿改）。</summary>
+        private static double[] ThresholdsFor(string kind)
+        {
+            if (kind == "cput") return _tTemp;
+            if (kind == "cpup") return _tPower;
+            if (kind == "cpul") return _tLoad;
+            if (kind == "gput") return _tGpuTemp;
+            return _tLoad;
+        }
+
         public static double[] ThresholdsOf(string kind)
         {
-            double[] src = kind == "cput" ? _tTemp : (kind == "cpup" ? _tPower : _tLoad);
+            double[] src = ThresholdsFor(kind);
             return new double[] { src[0], src[1], src[2] };
         }
 
         /// <summary>某个指标的当前阈值文本（界面显示用）。</summary>
+        /// <summary>阈值在 settings.txt 里的键名。</summary>
+        private static string ThresholdKey(string kind)
+        {
+            if (kind == "cput") return "tray_icon_t";
+            if (kind == "cpup") return "tray_icon_p";
+            if (kind == "cpul") return "tray_icon_l";
+            if (kind == "gput") return "tray_icon_gt";
+            return "tray_icon_l";
+        }
+
         public static string ThresholdText(string kind)
         {
-            if (kind == "cput") return Text(_tTemp);
-            if (kind == "cpup") return Text(_tPower);
-            return Text(_tLoad);
+            return Text(ThresholdsFor(kind));
         }
 
         /// <summary>保存某个指标的阈值；不合法返回 false（界面据此回滚输入框）。</summary>
         public static bool SaveThresholds(string kind, string text, out string reason)
         {
             reason = "";
-            string key = kind == "cput" ? "tray_icon_t" : (kind == "cpup" ? "tray_icon_p" : "tray_icon_l");
-            double[] cur = kind == "cput" ? _tTemp : (kind == "cpup" ? _tPower : _tLoad);
-            double[] fallback = kind == "cput" ? DefaultTemp : (kind == "cpup" ? DefaultPower : DefaultLoad);
+            string key = ThresholdKey(kind);
+            double[] cur = ThresholdsFor(kind);
+            double[] fallback = kind == "gput" ? DefaultGpuTemp : (kind == "cput" ? DefaultTemp : (kind == "cpup" ? DefaultPower : DefaultLoad));
             string[] parts = (text ?? "").Split(new char[] { ',' });
             if (parts.Length != 3) { reason = "需要 3 个数（逗号分隔）"; return false; }
             double[] r = new double[3];
@@ -3330,7 +3632,10 @@ namespace OpenMIFS
                 { reason = "「" + parts[i].Trim() + "」不是正数"; return false; }
             }
             if (!(r[0] < r[1] && r[1] < r[2])) { reason = "三个数必须严格递增"; return false; }
-            if (kind == "cput") _tTemp = r; else if (kind == "cpup") _tPower = r; else _tLoad = r;
+            if (kind == "cput") _tTemp = r;
+            else if (kind == "cpup") _tPower = r;
+            else if (kind == "gput") _tGpuTemp = r;
+            else _tLoad = r;
             try { Settings.Set(key, Text(r)); } catch (Exception ex) { Log.Ex("保存托盘图标阈值失败", ex); }
             Log.Info("托盘图标：阈值 " + kind + " 改为 " + Text(r) + (cur == fallback ? "" : ""));
             return true;
@@ -3339,12 +3644,13 @@ namespace OpenMIFS
         /// <summary>恢复默认阈值。</summary>
         public static void ResetThresholds()
         {
-            _tTemp = DefaultTemp; _tPower = DefaultPower; _tLoad = DefaultLoad;
+            _tTemp = DefaultTemp; _tPower = DefaultPower; _tLoad = DefaultLoad; _tGpuTemp = DefaultGpuTemp;
             try
             {
                 Settings.Set("tray_icon_t", Text(_tTemp));
                 Settings.Set("tray_icon_p", Text(_tPower));
                 Settings.Set("tray_icon_l", Text(_tLoad));
+                Settings.Set("tray_icon_gt", Text(_tGpuTemp));
             }
             catch (Exception ex) { Log.Ex("保存默认阈值失败", ex); }
         }
@@ -3376,7 +3682,7 @@ namespace OpenMIFS
             double d;
             if (!double.TryParse(num, NumberStyles.Float, CultureInfo.InvariantCulture, out d)) return null;
 
-            double[] th = kind == "cput" ? _tTemp : (kind == "cpup" ? _tPower : _tLoad);
+            double[] th = ThresholdsFor(kind);     // gput 走 GPU 温度阈值
             level = 1;
             if (d >= th[0]) level = 2;
             if (d >= th[1]) level = 3;
@@ -3384,16 +3690,7 @@ namespace OpenMIFS
             return ((int)Math.Round(d)).ToString(CultureInfo.InvariantCulture);
         }
 
-        private static Color LevelColor(int level)
-        {
-            switch (level)
-            {
-                case 1: return Color.FromArgb(38, 118, 66);     // 凉：绿
-                case 2: return Color.FromArgb(158, 118, 20);    // 温：琥珀
-                case 3: return Color.FromArgb(176, 74, 24);     // 热：橙
-                default: return Color.FromArgb(168, 36, 36);    // 烫：红
-            }
-        }
+        private static Color LevelColor(int level) { return Ui.LevelColor(level); }   // 填充色 = 用户配置的档位色（面板/图标共用一套）
 
         /// <summary>画一枚图标（size×size）。--icon-preview 与运行时共用，保证预览就是运行时那枚。</summary>
         public static Bitmap Render(string text, int level, int size)
@@ -3415,7 +3712,7 @@ namespace OpenMIFS
                     // 2 字符用大字号，3 字符自动缩一档
                     float px = text.Length <= 2 ? size * 0.60f : size * 0.44f;
                     using (Font f = new Font("Segoe UI", px, FontStyle.Bold, GraphicsUnit.Pixel))
-                    using (SolidBrush fg = new SolidBrush(Color.White))
+                    using (SolidBrush fg = new SolidBrush(Ui.IconTextColor(LevelColor(level))))   // 浅色填充时自动用深字
                     using (StringFormat sf = new StringFormat())
                     {
                         sf.Alignment = StringAlignment.Center;

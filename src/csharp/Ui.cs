@@ -94,12 +94,132 @@ namespace OpenMIFS
             return lv;
         }
 
+        // ── 档位颜色可自定义（全局一套；settings.txt: color_l1..color_l4 = #RRGGBB）
+        private static Color[] _levels = new Color[] { Cold, Warm, Hot, Scald };
+        public static readonly Color[] LevelPresets = new Color[] { Cold, Warm, Hot, Scald };
+
+        /// <summary>档位原色（图标填充、色块用）。level 1~4。</summary>
         public static Color LevelColor(int level)
         {
-            if (level <= 1) return Cold;
-            if (level == 2) return Warm;
-            if (level == 3) return Hot;
-            return Scald;
+            int i = level <= 1 ? 0 : (level >= 4 ? 3 : level - 1);
+            return _levels[i];
+        }
+
+        /// <summary>面板文字色：原色对比度不足 4.5:1 时自动加深（保持色相），保证可读。</summary>
+        public static Color PanelColorOf(int level)
+        {
+            Color c = LevelColor(level);
+            if (RawColors) return c;          // 用户选择"用原色"时不做任何加深
+            int guard = 0;
+            while (Contrast(c, Recessed) < 4.5 && guard++ < 24)
+                c = Color.FromArgb((int)(c.R * 0.86), (int)(c.G * 0.86), (int)(c.B * 0.86));
+            return c;
+        }
+
+        /// <summary>相对亮度（WCAG）。</summary>
+        public static double RelLum(Color c)
+        {
+            // 注意：C# 5 不支持局部函数，所以这里不抽 f()
+            double r = c.R / 255.0, g = c.G / 255.0, b = c.B / 255.0;
+            r = r <= 0.03928 ? r / 12.92 : Math.Pow((r + 0.055) / 1.055, 2.4);
+            g = g <= 0.03928 ? g / 12.92 : Math.Pow((g + 0.055) / 1.055, 2.4);
+            b = b <= 0.03928 ? b / 12.92 : Math.Pow((b + 0.055) / 1.055, 2.4);
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        }
+
+        /// <summary>两色对比度。</summary>
+        public static double Contrast(Color a, Color b)
+        {
+            double la = RelLum(a) + 0.05, lb = RelLum(b) + 0.05;
+            return la > lb ? la / lb : lb / la;
+        }
+
+        /// <summary>托盘图标上的字符色：填充色偏亮时用深字，否则白字。</summary>
+        public static Color IconTextColor(Color fill)
+        {
+            return RelLum(fill) > 0.55 ? Ink : Color.White;
+        }
+
+        public static string HexOf(Color c)
+        {
+            return "#" + c.R.ToString("X2", CultureInfo.InvariantCulture)
+                       + c.G.ToString("X2", CultureInfo.InvariantCulture)
+                       + c.B.ToString("X2", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>解析 "#RRGGBB" / "RRGGBB"（大小写皆可）。</summary>
+        public static bool TryParseHex(string s, out Color c)
+        {
+            c = Color.Empty;
+            if (string.IsNullOrEmpty(s)) return false;
+            s = s.Trim().TrimStart('#');
+            if (s.Length != 6) return false;
+            int r, g, b;
+            if (!int.TryParse(s.Substring(0, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out r)) return false;
+            if (!int.TryParse(s.Substring(2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out g)) return false;
+            if (!int.TryParse(s.Substring(4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out b)) return false;
+            c = Color.FromArgb(r, g, b);
+            return true;
+        }
+
+        /// <summary>启动时载入档位颜色（缺键/非法值一律回退默认并留日志）。</summary>
+        public static void LoadColors()
+        {
+            Color[] def = new Color[] { Cold, Warm, Hot, Scald };
+            for (int i = 0; i < 4; i++)
+            {
+                string raw = Settings.Get("color_l" + (i + 1).ToString(CultureInfo.InvariantCulture), "");
+                Color c;
+                if (raw.Length == 0) { _levels[i] = def[i]; continue; }
+                if (TryParseHex(raw, out c)) _levels[i] = c;
+                else { _levels[i] = def[i]; Log.Warn("档位颜色非法，回退默认：" + raw + " → " + HexOf(def[i])); }
+            }
+            Log.Info("档位颜色：" + HexOf(_levels[0]) + " / " + HexOf(_levels[1]) + " / " + HexOf(_levels[2]) + " / " + HexOf(_levels[3]));
+            RawColors = Settings.Get("color_raw", "0") == "1";
+            Log.Info("面板数值" + (RawColors ? "使用原色" : "使用可读色（自动加深）"));
+        }
+
+        /// <summary>true = 面板数值直接用配置原色（不做对比度加深）。默认 false（保证可读）。</summary>
+        public static bool RawColors = false;
+
+        /// <summary>设置"面板数值用原色"并落盘。</summary>
+        public static void SetRawColors(bool on)
+        {
+            RawColors = on;
+            try { Settings.Set("color_raw", on ? "1" : "0"); } catch (Exception ex) { Log.Ex("保存原色开关失败", ex); }
+            Log.Info("面板数值" + (on ? "使用原色（不做对比度加深）" : "使用可读色（自动加深）"));
+        }
+
+        /// <summary>四个档位颜色全部恢复默认。</summary>
+        public static void ResetColors()
+        {
+            Color[] def = new Color[] { Cold, Warm, Hot, Scald };
+            for (int i = 0; i < 4; i++)
+            {
+                _levels[i] = def[i];
+                try { Settings.Set("color_l" + (i + 1).ToString(CultureInfo.InvariantCulture), HexOf(def[i])); }
+                catch (Exception ex) { Log.Ex("恢复默认颜色失败", ex); }
+            }
+            Log.Info("档位颜色已恢复默认：" + HexOf(def[0]) + " / " + HexOf(def[1]) + " / " + HexOf(def[2]) + " / " + HexOf(def[3]));
+        }
+
+        /// <summary>保存某一档颜色（level 1~4）。</summary>
+        public static void SaveColor(int level, Color c)
+        {
+            int i = level <= 1 ? 0 : (level >= 4 ? 3 : level - 1);
+            _levels[i] = c;
+            try { Settings.Set("color_l" + (i + 1).ToString(CultureInfo.InvariantCulture), HexOf(c)); }
+            catch (Exception ex) { Log.Ex("保存档位颜色失败", ex); }
+            Log.Info("档位颜色 " + (i + 1).ToString(CultureInfo.InvariantCulture) + " → " + HexOf(c));
+        }
+
+        /// <summary>档位字（色块标签用）。</summary>
+        public static string LevelWord(int level)
+        {
+            if (level <= 1) return "凉";
+            if (level == 2) return "温";
+            if (level == 3) return "热";
+            return "烫";
         }
 
         /// <summary>把 "23.96 W" / "55 ℃" 拆成数值与单位；拆不开就整体当数值。</summary>
@@ -348,6 +468,13 @@ namespace OpenMIFS
 
         public Label ValueLabel { get { return _val; } }
 
+        /// <summary>整行可见性（多风扇/多硬盘时用：没有这一路就隐藏，不留空行）。</summary>
+        public bool Visible
+        {
+            get { return _key.Visible; }
+            set { _key.Visible = value; _val.Visible = value; _unit.Visible = value; }
+        }
+
         /// <summary>ok=false → 数值走 Muted（不可用）；level&gt;0 → 数值走档位色。</summary>
         public void Set(string value, string unit, bool ok, int level)
         {
@@ -360,7 +487,7 @@ namespace OpenMIFS
         {
             if (!_hasValue) return;
             _val.Text = _rawValue;
-            _val.ForeColor = !_rawOk ? Ui.Muted : (_rawLevel > 0 ? Ui.LevelColor(_rawLevel) : Ui.Ink);
+            _val.ForeColor = !_rawOk ? Ui.Muted : (_rawLevel > 0 ? Ui.PanelColorOf(_rawLevel) : Ui.Ink);
             _unit.Text = _rawUnit;
             _unit.ForeColor = _rawOk ? Ui.Label : Ui.Muted;
             FitFont();
@@ -468,10 +595,10 @@ namespace OpenMIFS
         {
             bool has = ok && !string.IsNullOrEmpty(value);
             _val.Text = has ? value : "—";
-            _val.ForeColor = !has ? Ui.Muted : (level > 0 ? Ui.LevelColor(level) : Ui.Ink);
+            _val.ForeColor = !has ? Ui.Muted : (level > 0 ? Ui.PanelColorOf(level) : Ui.Ink);
             _unit.Text = has ? unit : "";
             _cap.Text = caption;      // 不再拼"· 凉/温/热/烫"（用户要求去掉）
-            _cap.ForeColor = (!has || level == 0) ? Ui.Label : Ui.LevelColor(level);
+            _cap.ForeColor = (!has || level == 0) ? Ui.Label : Ui.PanelColorOf(level);
         }
     }
 }

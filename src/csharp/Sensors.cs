@@ -734,6 +734,40 @@ namespace OpenMIFS
                         string.Format(CultureInfo.InvariantCulture, "{0:0} GB", gb), true,
                         "型号 " + name + (media.Length > 0 ? "（" + media + "）" : "") + (note.Length > 0 ? "　" + note : "")));
                     list.Add(new Reading("存储", "磁盘温度", tempText, tempOk, tempNote));
+
+                    // ── 其余物理盘：同一份 MSFT_PhysicalDisk 结果里逐个补出（DeviceId 即盘号）
+                    //    每盘一行容量 + 一行温度；温度走已按盘号参数化的 IOCTL 链
+                    try
+                    {
+                        // 必须带命名空间：MSFT_PhysicalDisk 在 root\Microsoft\Windows\Storage 下，
+                        // 漏了命名空间会报"无效类"（v0.6.3 实测踩到）。
+                        ManagementObjectSearcher q2 = new ManagementObjectSearcher(
+                            "root\\Microsoft\\Windows\\Storage",
+                            "SELECT FriendlyName,MediaType,BusType,Size,DeviceId FROM MSFT_PhysicalDisk");
+                        foreach (ManagementBaseObject o2 in q2.Get())
+                        {
+                            int idx2;
+                            if (!int.TryParse(S(o2["DeviceId"]), NumberStyles.Integer, CultureInfo.InvariantCulture, out idx2)) continue;
+                            if (idx2 < 1) continue;   // 0 号盘上面已经出过一行（系统盘通常是 PhysicalDrive0）
+                            string ord = (idx2 + 1).ToString(CultureInfo.InvariantCulture);   // 盘号从 0 起 → 展示序号从 1 起
+                            string name2 = S(o2["FriendlyName"]);
+                            string media2 = MediaTypeName(Int(o2["MediaType"]));
+                            double gb2 = Num(o2["Size"]) / 1073741824.0;
+                            List<string> why2 = new List<string>();
+                            int? t2 = DiskTemperatureIoctl(idx2, why2);
+                            if (!t2.HasValue) t2 = NvmeTemperatureIoctl(idx2, why2);
+                            bool ok2 = t2.HasValue && t2.Value > 0;
+                            list.Add(new Reading("存储", "磁盘" + ord,
+                                string.Format(CultureInfo.InvariantCulture, "{0:0} GB", gb2), true,
+                                "型号 " + name2 + (media2.Length > 0 ? "（" + media2 + "）" : "")
+                                + "　盘号 " + idx2.ToString(CultureInfo.InvariantCulture)));
+                            list.Add(new Reading("存储", "磁盘" + ord + " 温度",
+                                ok2 ? t2.Value.ToString(CultureInfo.InvariantCulture) + " ℃" : "未实现", ok2,
+                                ok2 ? "IOCTL PhysicalDrive" + idx2.ToString(CultureInfo.InvariantCulture)
+                                    : string.Join("；", why2.ToArray())));
+                        }
+                    }
+                    catch (Exception ex2) { Log.Ex("传感器：读取其余物理盘失败", ex2); }
                 }
             }
             catch (Exception ex) { Log.Ex("传感器：读磁盘失败", ex); }
