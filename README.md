@@ -16,6 +16,7 @@ OpenMIFS.exe --tray        ← 只驻留托盘，不弹主界面（开机自启�
 OpenMIFS.exe --diagnose    ← 无界面采集 OSD 诊断证据（排障用）
 OpenMIFS.exe --sensors     ← 无界面传感器探测，逐项报告本机可用通道
 OpenMIFS.exe --icon-preview← 把托盘图标各数值各 DPI 画成放大对照图（确认可读性）
+OpenMIFS.exe --toggle-test=3← 回归：反复切换"隐藏到托盘 / 显示主界面"（守住历史崩溃路径）
 mifs-gui.cmd               ← 从源码直接跑图形界面
 mifs.cmd status            ← 从源码跑命令行版
 ```
