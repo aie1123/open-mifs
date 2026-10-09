@@ -1,4 +1,4 @@
-# AGENTS.md — OpenMIFS 项目约定
+﻿# AGENTS.md — OpenMIFS 项目约定
 
 > 给 AI 编码助手（以及新加入的人）看的。**动手前先读完这页**，这里写的都是踩过坑换来的。
 
@@ -141,18 +141,64 @@
 
 ---
 
+## 6.2 大段代码改动的铁律（血的教训，v0.6.3 期间两次误删方法）
+
+自动化/AI 改这个仓库的大段代码时（尤其**整块布局方法**），**禁止"按括号切片"替换**：
+
+```powershell
+# ❌ 禁止：靠"方法头 → 第一个 8 空格右括号"定位
+$i = $t.IndexOf('        private void LayoutPrefs(double s)')
+$j = $t.IndexOf("`n        }`n", $i)          # ← 这个 } 未必是本方法的结尾
+$t = $t.Substring(0, $i) + $new + $t.Substring($j)
+```
+
+原因：仓库里方法之间只隔一个空行，方法数又多（`MainForm` 60+ 个），一旦定位到下一个方法的右括号，
+就会把**中间的方法整段删掉**。实测后果：
+
+| 事故 | 被删掉的方法 | 症状 |
+| :--- | :--- | :--- |
+| v0.6.3 第 1 次 | `TogglePrefs`（偏好设置展开/收起） | `CS0103 当前上下文中不存在名称 TogglePrefs` |
+| v0.6.3 第 2 次 | `OnElevateClick`（以管理员重启） | `CS0103 当前上下文中不存在名称 OnElevateClick` |
+
+**正确做法（三选一）**
+
+1. **整方法精确替换**：把旧方法全文作为 `old_string`，新方法全文作为 `new_string`（最稳，推荐）
+2. **唯一后继标记切片**：结束锚点用**紧随其后、并且只出现一次**的文本（如下一个方法的 XML 注释首行），
+   不要用 `}` 这种到处都有的字符
+3. 小改动一律**逐行精确替换**（单行/固定多行文本），不要碰结构
+
+**改完必须自检（两条，缺一不可）**
+
+```powershell
+# ① 方法存活检查：改动区域涉及的方法名逐个计数，定义+调用点数量应保持不变
+foreach ($m in 'TogglePrefs','OnElevateClick','LayoutPrefs') {
+  "$m = " + (Select-String -Path $f -Pattern ([regex]::Escape($m)) | Measure-Object).Count
+}
+# ② 括号配对统计：两个数必须相等
+$t = [System.IO.File]::ReadAllText($f,[System.Text.Encoding]::UTF8)
+"{{ = " + ([regex]::Matches($t,'\{{')).Count + "  }} = " + ([regex]::Matches($t,'\}}')).Count
+```
+
+另外两条同类教训（.NET Framework 自带 csc 的限制）：
+
+- **C# 5 不支持局部函数**：`double f(double v) { ... }` 写在方法体里会报 `CS1513 应输入 }`，
+  必须改成内联表达式或私有静态方法
+- **PowerShell 双引号串里的 `""` 会变成一个 `"`**：生成 C# 代码时，含 `""` 的行要用**单引号串**书写，
+  否则会产出 `_x.Text = ";` 这种未闭合字符串（报 `CS1010 常量中有换行符`）
+
+---
 ## 7. 代码地图（改哪里）
 
 | 想改的东西 | 位置 |
 | :--- | :--- |
 | MIFS 调用、功能号、模式映射 | `OpenMIFS.cs` 的 `Mifs` / `ModeMap` |
-| 界面 token（颜色/字体/间距）与自绘控件 | `src/csharp/Ui.cs`（`Ui` / `FlatButton` / `RecessedPanel` / `SectionTitle` / `ReadoutRow` / `BigReadout`） |
+| 界面 token（颜色/字体/间距，含档位配色 `color_l1..l4`）与自绘控件 | `src/csharp/Ui.cs`（`Ui` / `FlatButton` / `RecessedPanel` / `SectionTitle` / `ReadoutRow` / `BigReadout`） |
 | 界面布局与读数渲染 | `MainForm`（`BuildUi` / `BuildPrefsUi` / `RefreshAll` / `RefreshSensors` / `ApplyBig` / `LevelOf`）—— 设计依据见 `docs/UI-DESIGN.md` |
 | 托盘菜单、托盘提示、托盘图标 | `TrayContext` / `TrayText` / `TrayIcon` |
 | 传感器读取 | `Sensors.cs`（`ReadAll` / `Render` / `AdlPmlog` / IOCTL 兜底） |
-| OSD 诊断与自带屏幕提示 | `OpenMIFS.cs` 的 `Osd` / `OsdDpi` / `OsdOverlay` |
+| OSD 诊断与自带屏幕提示 | `OpenMIFS.cs` 的 `Osd` / `OsdOverlay`（`OsdDpi` 已于 v0.6.2 移除，需要时手动写注册表，见 `docs/OSD.md`） |
 | 开机自启（计划任务） | `OpenMIFS.cs` 的 `Startup`（**必须带 `--tray`**） |
-| 设置项（`settings.txt`） | `Settings.Get/Set`；现有键：`osd_hint`、`tray_items`、`tray_icon`、`tray_icon_t/p/l` |
+| 设置项（`settings.txt`） | `Settings.Get/Set`；现有键：`osd_hint`、`tray_items`、`tray_icon`、`tray_icon_t/p/l/gt`、`auto_refresh`、`color_l1..color_l4`、`color_raw` |
 | 日志 | `Log`（`%LOCALAPPDATA%\OpenMIFS\openmifs.log`，>1 MB 轮转） |
 
 线程模型：UI 线程做界面；传感器读取在线程池（首次 1~2 秒，PDH 需预热 700 ms）；

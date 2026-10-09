@@ -37,8 +37,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.6.3.0")]
-[assembly: AssemblyFileVersion("0.6.3.0")]
+[assembly: AssemblyVersion("0.6.4.0")]
+[assembly: AssemblyFileVersion("0.6.4.0")]
 
 namespace OpenMIFS
 {
@@ -2582,8 +2582,8 @@ namespace OpenMIFS
                             _lblSensorHint.Text = "读取失败：" + err + "（详见日志）";
                             return;
                         }
-                        ApplyBig(_big[0], list, "CPU 温度", "温度", "cput");
-                        ApplyBig(_big[1], list, "CPU 功耗", "功耗", "cpup");   // 功耗也按阈值变色（与温度同规则）
+                        ApplyBig(_big[0], list, "CPU 温度", "CPU 温度", "cput");
+                        ApplyBig(_big[1], list, "CPU 功耗", "CPU 功耗", "cpup");   // 功耗也按阈值变色（与温度同规则）
                         for (int i = 0; i < _rowNames.Count; i++)
                         {
                             if (_rowNames[i] == "风扇2" || _rowNames[i] == "风扇3") continue;   // 风扇行由 RefreshAll 用 MIFS 喂数
