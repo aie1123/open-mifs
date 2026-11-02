@@ -352,7 +352,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 .\build\build.ps1          # 编译，产物在 dist\OpenMIFS.exe
 ```
 
-约 3 秒完成，产物约 50 KB。
+约 3 秒完成，v0.6.5 产物为 178,688 字节（174.5 KB）。
 
 ---
 
@@ -360,9 +360,11 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 
 | 文件 | 作用 |
 | :--- | :--- |
-| `build/build.ps1` | 用系统自带 `csc.exe` 编译 `src/csharp/OpenMIFS.cs` → `dist/OpenMIFS.exe`，内嵌图标与 `requireAdministrator` 清单，输出大小与 SHA256 |
+| `build/build.ps1` | 用系统自带 `csc.exe` 编译 `src/csharp/` 中的四个源文件 → `dist/OpenMIFS.exe`，内嵌图标与 `requireAdministrator` 清单，输出大小与 SHA256 |
 | `build/make-icon.ps1` | 程序化生成多尺寸图标 `assets/icon.ico`（16/24/32/48/64/128/256） |
-| `.github/workflows/build.yml` | CI：脚本语法检查 → 生成图标 → 编译 → 上传产物；打 `v*` tag 时自动发 Release |
+| `build/test-layout.ps1` | 隔离副本中的 144 组布局回归；`-NoScreenshots` 供 CI 使用，`-ToggleTest` 检查托盘显隐 |
+| `build/test-startup.ps1` | 自启任务 XML 的 37 项回归检查，不修改真实任务 |
+| `.github/workflows/build.yml` | CI：脚本语法与 BOM 检查 → 生成图标 → 编译 → 自启及布局回归 → 上传产物；打 `v*` tag 时自动发 Release |
 
 **为什么不用 .NET SDK / MSBuild？**
 Windows 自带的 `%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\csc.exe` 就能编译，
@@ -416,10 +418,14 @@ open-mifs/
 │  ├─ mifs-gui.ps1         ← 图形界面（PowerShell + WinForms）
 │  └─ csharp/
 │     ├─ OpenMIFS.cs       ← 托盘 exe 源码（界面 / MIFS / OSD / 日志）
+│     ├─ MainForm.Layout.cs ← 主窗口自适应布局（换列 / 换行 / 纵向滚动）
+│     ├─ Ui.cs             ← 字体测量、自绘控件与可重排读数
 │     ├─ Sensors.cs        ← 传感器读取层（PDH + WMI + ADL 探测）
 │     └─ app.manifest      ← requireAdministrator + DPI
 ├─ build/
 │  ├─ build.ps1            ← 编译 exe
+│  ├─ test-layout.ps1      ← UI 布局与托盘显隐回归
+│  ├─ test-startup.ps1     ← 自启任务回归
 │  └─ make-icon.ps1        ← 生成图标
 ├─ assets/icon.ico         ← 原创图标
 ├─ docs/
@@ -428,6 +434,7 @@ open-mifs/
 │  ├─ OSD.md               ← Fn 屏幕提示（OSD）故障诊断与修复
 │  ├─ FAN-CONTROL.md       ← 风扇调速可行性分析与实测结论
 │  ├─ TRAY-TOOLTIP.md      ← 托盘提示/图标自定义（白名单、预算、阈值、DPI 坑）
+│  ├─ UI-LAYOUT-VALIDATION.md ← 自适应布局规则、验证命令与证据边界
 │  ├─ ARCHITECTURE.md      ← 模块划分、数据流、线程模型、扩展点
 │  ├─ TESTED-MODELS.md     ← 机型实测矩阵
 │  └─ screenshots/         ← 界面截图

@@ -30,6 +30,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.Xml;
 
 // ─────────────────────────────────────────────────────── 程序集版本信息
 [assembly: AssemblyTitle("OpenMIFS")]
@@ -37,8 +38,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OpenMIFS")]
 [assembly: AssemblyCompany("OpenMIFS contributors")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.6.4.0")]
-[assembly: AssemblyFileVersion("0.6.4.0")]
+[assembly: AssemblyVersion("0.6.5.0")]
+[assembly: AssemblyFileVersion("0.6.5.0")]
 
 namespace OpenMIFS
 {
@@ -482,9 +483,10 @@ namespace OpenMIFS
     internal static class Startup
     {
         public const string TaskName = "OpenMIFS";
+        private const string TaskNamespace = "http://schemas.microsoft.com/windows/2004/02/mit/task";
 
         /// <summary>开机自启必须带的参数：静默进托盘，不弹主界面。
-        /// 早期版本创建的任务没带这个参数，登录时会弹出窗口 —— NeedsRepair() 会检出并重建。</summary>
+        /// NeedsRepair() 同时检查托盘参数、电池条件和运行时长上限。</summary>
         public const string TrayArgument = "--tray";
 
         public static bool IsEnabled()
@@ -502,13 +504,117 @@ namespace OpenMIFS
             return code == 0 ? o : "";
         }
 
-        /// <summary>任务存在但命令行不含 --tray（老版本创建的）→ 需要重建。</summary>
+        private static XmlDocument LoadTaskXml(string xml)
+        {
+            XmlDocument doc = new XmlDocument();
+            doc.XmlResolver = null;
+            doc.LoadXml(xml);
+            if (doc.DocumentElement == null || doc.DocumentElement.LocalName != "Task"
+                || doc.DocumentElement.NamespaceURI != TaskNamespace)
+                throw new InvalidDataException("计划任务 XML 的根元素或命名空间不正确");
+            return doc;
+        }
+
+        private static string TaskValue(XmlElement parent, string name)
+        {
+            XmlElement child = parent == null ? null : parent[name, TaskNamespace];
+            return child == null ? "" : child.InnerText.Trim();
+        }
+
+        private static void SetTaskValue(XmlElement parent, string name, string value)
+        {
+            XmlElement child = parent[name, TaskNamespace];
+            if (child == null)
+            {
+                child = parent.OwnerDocument.CreateElement(name, TaskNamespace);
+                parent.AppendChild(child);
+            }
+            child.InnerText = value;
+        }
+
+        private static XmlElement TaskExec(XmlDocument doc)
+        {
+            XmlElement actions = doc.DocumentElement["Actions", TaskNamespace];
+            XmlElement exec = actions == null ? null : actions["Exec", TaskNamespace];
+            if (exec == null) throw new InvalidDataException("计划任务缺少 Exec 动作");
+            return exec;
+        }
+
+        private static bool HasTrayArgument(string args)
+        {
+            foreach (string arg in args.Split(new char[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                if (String.Equals(arg.Trim('"'), TrayArgument, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        internal static bool TaskXmlNeedsRepair(string xml)
+        {
+            XmlDocument doc = LoadTaskXml(xml);
+            if (!HasTrayArgument(TaskValue(TaskExec(doc), "Arguments"))) return true;
+            XmlElement settings = doc.DocumentElement["Settings", TaskNamespace];
+            string batteryStart = TaskValue(settings, "DisallowStartIfOnBatteries");
+            string batteryStop = TaskValue(settings, "StopIfGoingOnBatteries");
+            if (batteryStart != "false" && batteryStart != "0") return true;
+            if (batteryStop != "false" && batteryStop != "0") return true;
+            string limit = TaskValue(settings, "ExecutionTimeLimit");
+            return limit.Length == 0 || XmlConvert.ToTimeSpan(limit) != TimeSpan.Zero;
+        }
+
+        internal static string RepairTaskXml(string xml)
+        {
+            XmlDocument doc = LoadTaskXml(xml);
+            XmlElement exec = TaskExec(doc);
+            string args = TaskValue(exec, "Arguments");
+            if (!HasTrayArgument(args)) SetTaskValue(exec, "Arguments", (args + " " + TrayArgument).Trim());
+            XmlElement settings = doc.DocumentElement["Settings", TaskNamespace];
+            if (settings == null)
+            {
+                settings = doc.CreateElement("Settings", TaskNamespace);
+                doc.DocumentElement.AppendChild(settings);
+            }
+            SetTaskValue(settings, "DisallowStartIfOnBatteries", "false");
+            SetTaskValue(settings, "StopIfGoingOnBatteries", "false");
+            SetTaskValue(settings, "ExecutionTimeLimit", "PT0S");
+            return doc.OuterXml;
+        }
+
+        internal static string CreateTaskXml(string exe, string userSid)
+        {
+            return RepairTaskXml("<Task version=\"1.2\" xmlns=\"" + TaskNamespace + "\">"
+                + "<Triggers><LogonTrigger><Enabled>true</Enabled><Delay>PT10S</Delay></LogonTrigger></Triggers>"
+                + "<Principals><Principal id=\"Author\"><UserId>" + System.Security.SecurityElement.Escape(userSid)
+                + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>"
+                + "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><Enabled>true</Enabled></Settings>"
+                + "<Actions Context=\"Author\"><Exec><Command>" + System.Security.SecurityElement.Escape(exe)
+                + "</Command><Arguments>" + TrayArgument + "</Arguments></Exec></Actions></Task>");
+        }
+
+        /// <summary>缺少 --tray、电池运行受限或存在运行时长上限时，需要迁移。</summary>
         public static bool NeedsRepair()
         {
             if (!IsEnabled()) return false;
             string xml = TaskCommand();
             if (xml.Length == 0) return false;   // 读不到就不动它
-            return xml.IndexOf(TrayArgument, StringComparison.OrdinalIgnoreCase) < 0;
+            return TaskXmlNeedsRepair(xml);
+        }
+
+        private static bool RegisterTaskXml(string xml, string action)
+        {
+            string file = Path.Combine(Path.GetTempPath(), "OpenMIFS-task-" + Guid.NewGuid().ToString("N") + ".xml");
+            try
+            {
+                File.WriteAllText(file, xml, Encoding.Unicode);
+                string output;
+                int code = Proc.Run("schtasks.exe", "/Create /TN \"" + TaskName + "\" /XML \"" + file + "\" /F", out output, 30000);
+                Log.Info("开机自启：" + action + "计划任务（exit=" + code.ToString(CultureInfo.InvariantCulture) + "）" + output.Replace("\r\n", " / "));
+                if (code != 0) return false;
+                string actual = TaskCommand();
+                bool ok = actual.Length > 0 && !TaskXmlNeedsRepair(actual);
+                if (!ok) Log.Warn("计划任务写入后核对失败：托盘参数、电池条件或运行时长上限不符合预期");
+                return ok;
+            }
+            catch (Exception ex) { Log.Ex("写入开机自启计划任务失败", ex); return false; }
+            finally { try { File.Delete(file); } catch { } }
         }
 
         /// <summary>创建/删除开机自启任务。用计划任务而不是 Run 注册表项，
@@ -517,16 +623,11 @@ namespace OpenMIFS
         /// 命令行里带 --tray：登录启动时只进托盘，不弹窗口。</summary>
         public static bool Set(bool enable)
         {
-            string exe = Application.ExecutablePath;
             string o;
             if (enable)
             {
-                string args = "/Create /TN \"" + TaskName + "\" /TR \"\\\"" + exe + "\\\" " + TrayArgument + "\""
-                            + " /SC ONLOGON /RL HIGHEST /F /DELAY 0000:10";
-                int code = Proc.Run("schtasks.exe", args, out o, 30000);
-                Log.Info("开机自启：创建计划任务（exit=" + code.ToString(CultureInfo.InvariantCulture) + "）" + o.Replace("\r\n", " / "));
-                if (code != 0) { Log.Warn("创建计划任务失败：" + o); return false; }
-                return IsEnabled();
+                using (System.Security.Principal.WindowsIdentity identity = System.Security.Principal.WindowsIdentity.GetCurrent())
+                    return RegisterTaskXml(CreateTaskXml(Application.ExecutablePath, identity.User.Value), "创建");
             }
             else
             {
@@ -536,15 +637,21 @@ namespace OpenMIFS
             }
         }
 
-        /// <summary>老任务（不带 --tray）自动重建，避免登录时弹窗。启动时调用，幂等。</summary>
+        /// <summary>启动时迁移旧任务；保留动作、触发器、权限等配置，写入前备份。</summary>
         public static void RepairIfNeeded()
         {
             try
             {
                 if (!NeedsRepair()) return;
-                Log.Warn("开机自启：现有计划任务不带 " + TrayArgument + "（老版本创建，登录会弹窗）→ 自动重建");
-                Set(true);
-                Log.Info("开机自启：重建完成，新命令行含 " + TrayArgument);
+                string original = TaskCommand();
+                if (original.Length == 0) return;
+                string repaired = RepairTaskXml(original);
+                Directory.CreateDirectory(Log.Folder);
+                string backup = Path.Combine(Log.Folder, "startup-task-before-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture) + ".xml");
+                File.WriteAllText(backup, original, Encoding.Unicode);
+                Log.Warn("开机自启：旧任务需要修复，备份已写入 " + backup);
+                if (RegisterTaskXml(repaired, "修复"))
+                    Log.Info("开机自启：修复完成，含 --tray；允许电池运行，切换电池不停止，无运行时长上限");
             }
             catch (Exception ex) { Log.Ex("修复开机自启任务失败", ex); }
         }
@@ -1145,7 +1252,7 @@ namespace OpenMIFS
     }
 
     // ──────────────────────────────────────────────────────────────── 主窗口
-    internal sealed class MainForm : Form
+    internal sealed partial class MainForm : Form
     {
         // ── 顶部状态条（N4：版本只在标题栏出现；徽标之间不用 "·" 串接）
         private readonly Label _lblBrand = new Label();
@@ -1197,7 +1304,7 @@ namespace OpenMIFS
         private readonly Label[] _clusterLabels = new Label[] { new Label(), new Label(), new Label() };
         private readonly Label _lblHintMode = new Label();
         private SectionTitle _secMode, _secSw, _secKbd, _secFan, _secOsd;
-        private double _s = 1.0;          // 布局缩放系数（LayoutAll 计算）
+        private double _s = 1.0;          // DPI 缩放系数；不随窗口大小变化
         private bool _layoutBusy;         // 防重入：改尺寸会触发 Resize
         private bool _prefsOpen;
         private readonly System.Windows.Forms.Timer _layoutTimer = new System.Windows.Forms.Timer();
@@ -1205,50 +1312,12 @@ namespace OpenMIFS
         private bool _resizing;           // 正在拖边框（WM_ENTERSIZEMOVE ~ WM_EXITSIZEMOVE）
         private int _lastLayW = -1, _lastLayH = -1;
 
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        private static extern int SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
-        private const int WM_SETREDRAW = 0x000B;
-
-        /// <summary>拖动改变大小时挂起重绘：几千次子控件尺寸变更只换来一次重画。</summary>
-        private void SuspendRedraw() { try { if (IsHandleCreated && Visible) SendMessage(Handle, WM_SETREDRAW, 0, 0); } catch { } }
-        private void ResumeRedraw() { try { if (IsHandleCreated && Visible) { SendMessage(Handle, WM_SETREDRAW, 1, 0); Invalidate(true); } } catch { } }
-
         /// <summary>尺寸变化 → 攒 45ms 再重排一次（拖动时每秒上百个 Resize 事件只算一次）。</summary>
         private void QueueLayout()
         {
             if (!Visible) return;          // 隐藏态不需要重排（也避免句柄重建期间碰 Handle）
             _layoutDirty = true;
             if (!_layoutTimer.Enabled) _layoutTimer.Start();
-        }
-
-        /// <summary>
-        /// 拖动边框期间的廉价重排：只动几个容器与贴边控件（十几条属性赋值，&lt;1ms），
-        /// 不碰字体/读数行/簇标签 —— 完整重排等松手后做一次（实测完整重排 30~70ms，
-        /// 每帧都做就是拖动卡顿的来源）。
-        /// </summary>
-        private void LayoutCheap()
-        {
-            int W = ClientSize.Width, H = ClientSize.Height;
-            int X = Ui.S(12, _s), leftW = Ui.S(Ui.LeftW, _s), gap = Ui.S(Ui.Gap, _s);
-            int bottomY = H - Ui.S(32, _s);
-            _barLine.Width = W;
-            _btnRefreshNow.Left = W - Ui.S(106, _s);
-            _btnElevate.Left = W - Ui.S(226, _s);
-            _chkAuto.Top = bottomY;
-            _cmbInterval.Top = bottomY - Ui.S(1, _s);
-            _lblSensorHint.Top = bottomY + Ui.S(2, _s);
-            _lblSensorHint.Width = Math.Max(Ui.S(120, _s), W - X - Ui.S(188, _s));
-            int rx = X + leftW + Ui.S(12, _s);
-            int rw = Math.Max(Ui.S(240, _s), W - rx - X);
-            _pnlReadout.Left = rx;
-            // 明细行宽度也跟着变，并重跑字号适配（否则拖动过程中长值会被裁，要等 2 秒刷新才恢复）
-            int innerWCheap = rw - Ui.S(Ui.Pad, _s) * 2 - 4;
-            if (innerWCheap > Ui.S(120, _s))
-                for (int i = 0; i < _rows.Count; i++) _rows[i].RefitWidth(innerWCheap + 4, _s);
-            _pnlReadout.Width = rw;
-            _pnlReadout.Height = bottomY - Ui.S(52, _s) - Ui.S(8, _s);
-            _pnlPrefs.Width = leftW;
-            _lastLayW = -1; _lastLayH = -1;   // 松手后必须做一次完整重排
         }
 
         // ── 右列：读数（凹陷面板；关键三项 + 三簇明细）
@@ -1306,12 +1375,12 @@ namespace OpenMIFS
         public MainForm()
         {
             Text = "OpenMIFS v" + MifsApp.VersionText + " — 同方 MIFS 控制台";
-            // 布局缩放由 LayoutAll() 自己算（见 Ui.F/Ui.S）；关掉 WinForms 的字体自动缩放，
-            // 否则 125%/150% DPI 下会被二次放大 → 中文下缘被截断、偏好设置撑出窗口。
+            // DPI 只缩放字体和间距，窗口尺寸只决定换列和换行。
+            // 禁用 WinForms 二次自动缩放，由 MainForm.Layout.cs 统一计算。
             AutoScaleMode = AutoScaleMode.None;
             DoubleBuffered = true;              // 自绘控件 + 频繁重排：不双缓冲会闪
-            ClientSize = new Size(940, 920);   // 加高：展开偏好设置时一屏放下，不出滚动条
-            MinimumSize = new Size(720, 600);
+            ClientSize = new Size(1040, 760);
+            MinimumSize = new Size(480, 360);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.Sizable;   // 可拖动缩放：右列数据区跟着窗口变大
             MaximizeBox = true;
@@ -1322,6 +1391,7 @@ namespace OpenMIFS
 
             Ui.LoadColors();      // 档位颜色（settings.txt: color_l1..color_l4）
             BuildUi();
+            BuildResponsiveShell();
             LayoutAll(true);
             // 自动刷新：默认开（用户可关，选择记进 settings.txt）
             _chkAuto.Checked = Settings.Get("auto_refresh", "1") != "0";
@@ -1342,8 +1412,7 @@ namespace OpenMIFS
                 _layoutTimer.Stop();
                 if (!_layoutDirty) return;
                 _layoutDirty = false;
-                if (_resizing) LayoutCheap();   // 拖动中：只挪容器与贴边控件（几十个属性，<1ms）
-                else LayoutAll(false);          // 松手后：完整重排（字号/行高/簇一起变）
+                LayoutAll(false);              // 拖动与松手共用同一套可换行布局，避免中途裁切
             };
 
             TrayText.Load();
@@ -1584,20 +1653,14 @@ namespace OpenMIFS
         }
 
         // ────────────────────────────────────────────────────── UI 构建
-        // 布局：左列 = 硬件控制（固定宽度），右列 = 状态 + 传感器（随窗口缩放）
-        private const int LeftColX = 12;
-        private const int LeftColW = 456;
-        private const int RightColX = 480;
-        private const int RightColGap = 12;
-
         // ═══════════════════════════════════════════════════════════════
         //  界面构建（v0.6.0「仪表台」三区布局，见 docs/UI-DESIGN.md §2）
         //  左列控制（平面）/ 右列读数（凹陷）/ 顶部状态条 / 底部状态行
         // ═══════════════════════════════════════════════════════════════
         // ═══════════════════════════════════════════════════════════════
         //  界面：控件创建（BuildUi / BuildPrefsUi）+ 几何重排（LayoutAll）
-        //  几何全部按"设计单位 × 缩放系数 s"计算，s 由窗口大小决定：
-        //  拖大/拖小窗口时字号、行高、面板一起缩放（AutoScaleMode=None，不吃 WinForms 的二次缩放）
+        //  几何在 MainForm.Layout.cs：主网格换列、文本换行、统一纵向滚动。
+        //  字号只随 DPI 变化，不再把窗口当作整张画布缩放。
         // ═══════════════════════════════════════════════════════════════
         private SectionTitle NewTitle(string text)
         {
@@ -1739,7 +1802,7 @@ namespace OpenMIFS
             Controls.Add(_btnPrefs);
 
             _pnlPrefs.BackColor = Ui.Surface;
-            _pnlPrefs.AutoScroll = false;      // 不要滚动条：内容宽度=面板宽度，一旦出现竖条就会连带出横条并挤掉左侧标签
+            _pnlPrefs.AutoScroll = false;      // 随内容增长；滚动统一交给外层视口
             Controls.Add(_pnlPrefs);
             BuildPrefsUi();
 
@@ -2015,275 +2078,7 @@ namespace OpenMIFS
 
         // ────────────────────────────────────────────────────── 几何重排
         /// <summary>按窗口大小重排全部控件。Resize / Shown / 折叠切换时调用。</summary>
-        private void LayoutAll(bool force)
-        {
-            if (_layoutBusy || _pnlReadout == null) return;
-            _layoutBusy = true;
-            try
-            {
-                int W = ClientSize.Width, H = ClientSize.Height;
-                if (!force && W == _lastLayW && H == _lastLayH) return;   // 尺寸没变就别白算一遍（force=折叠切换等必须重排）
-                _lastLayW = W; _lastLayH = H;
-                SuspendRedraw();                                // 重排期间不重画，最后一次性恢复
-                double s = Math.Min(W / 940.0, H / 860.0);      // 设计画布 940×860
-                if (s < 0.78) s = 0.78;
-                if (s > 2.20) s = 2.20;
-                _s = s;
-
-                Font fUi = Ui.F(9F, false, false, s), fBold = Ui.F(9F, true, false, s), f8 = Ui.F(8F, false, false, s);
-                Font fVal = Ui.F(10F, true, true, s), fValSmall = Ui.F(9F, true, true, s), fBig = Ui.F(17F, true, true, s), fSub = Ui.F(9F, true, true, s);
-                int X = Ui.S(12, s), leftW = Ui.S(Ui.LeftW, s), pad = Ui.S(Ui.Pad, s), gap = Ui.S(Ui.Gap, s);
-                int ctrlH = Ui.S(Ui.CtrlH, s), rowH = Ui.S(Ui.RowH, s), h8 = Ui.TextH(f8, s);
-                int topY = Ui.S(52, s), bottomY = H - Ui.S(32, s);
-
-                // ── 顶部状态条
-                // 状态条：高度按字体行高、宽度按文字实测 —— 并且徽标必须排在品牌**实际宽度**之后，
-                // 否则品牌的底板会盖住「均衡」的头一个字（曾表现为"均字被截断"）。
-                int sbH = Ui.S(Ui.StatusBarH, s);
-                int brandH = Ui.TextH(fBold, s);
-                int brandW = TextRenderer.MeasureText("OpenMIFS", fBold,
-                    new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width + Ui.S(10, s);
-                _lblBrand.Font = fBold;
-                _lblBrand.Location = new Point(X, (sbH - brandH) / 2);
-                _lblBrand.Size = new Size(brandW, brandH);
-                Label[] badges = new Label[] { _lblBadgeMode, _lblBadgeAc, _lblBadgeOsd };
-                int[] bw = new int[] { Ui.S(72, s), Ui.S(112, s), Ui.S(170, s) };
-                int badgeH = Ui.TextH(fUi, s);
-                int bx = X + brandW + gap;
-                for (int i = 0; i < badges.Length; i++)
-                {
-                    badges[i].Font = fUi;
-                    badges[i].Location = new Point(bx, (sbH - badgeH) / 2);
-                    badges[i].Size = new Size(bw[i], badgeH);
-                    bx += bw[i] + gap;
-                }
-                _btnRefreshNow.Font = fUi;
-                _btnRefreshNow.Size = new Size(Ui.S(94, s), Ui.S(26, s));
-                _btnRefreshNow.Location = new Point(W - Ui.S(106, s), Ui.S(7, s));
-                _btnElevate.Font = fUi;
-                _btnElevate.Size = new Size(Ui.S(112, s), Ui.S(26, s));
-                _btnElevate.Location = new Point(W - Ui.S(226, s), Ui.S(7, s));
-
-                _barLine.Location = new Point(0, Ui.S(Ui.StatusBarH, s) - 1);
-                _barLine.Size = new Size(W, 1);
-
-                // ── 底部状态行：永远贴窗口底（偏好设置展开也不会压住它）
-                _chkAuto.Font = fUi;
-                _chkAuto.Location = new Point(X, bottomY);
-                _chkAuto.Size = new Size(Ui.S(92, s), Math.Max(Ui.S(22, s), Ui.TextH(fUi, s)));
-                _cmbInterval.Font = fUi;
-                _cmbInterval.Location = new Point(X + Ui.S(96, s), bottomY - Ui.S(1, s));
-                _cmbInterval.Size = new Size(Ui.S(70, s), Math.Max(Ui.S(22, s), Ui.TextH(fUi, s)));
-                _lblSensorHint.Font = f8;
-                _lblSensorHint.Location = new Point(X + Ui.S(176, s), bottomY + Ui.S(2, s));
-                _lblSensorHint.Size = new Size(W - X - Ui.S(188, s), h8);
-
-                // ── 左列
-                int y = topY;
-                y = LayoutTitle(_secMode, X, leftW, y, s, fBold);
-                int segW = (leftW - gap * 2) / 3;
-                for (int i = 0; i < _btnMode.Length; i++) Place(_btnMode[i], X + i * (segW + gap), y, segW, ctrlH, fUi);
-                y += ctrlH + Ui.S(4, s);
-                y = LayoutNote(_lblModeNote, X, leftW, y, s, f8);
-
-                y = LayoutTitle(_secSw, X, leftW, y, s, fBold);
-                int chkH = Math.Max(Ui.S(22, s), Ui.TextH(fUi, s));
-                Place(_chkFn, X, y + Ui.S(2, s), Ui.S(150, s), chkH, fUi);
-                Place(_chkTp, X + Ui.S(160, s), y + Ui.S(2, s), Ui.S(210, s), chkH, fUi);
-                y += Ui.S(30, s);
-
-                y = LayoutTitle(_secKbd, X, leftW, y, s, fBold);
-                int kw = Ui.S(62, s), kg = Ui.S(14, s);
-                for (int i = 0; i < _btnKbd.Length; i++) Place(_btnKbd[i], X + i * (kw + kg), y, kw, ctrlH, fUi);
-                y += ctrlH + Ui.S(4, s);
-                y = LayoutNote(_lblKbdNote, X, leftW, y, s, f8);
-
-                y = LayoutTitle(_secFan, X, leftW, y, s, fBold);
-                Place(_btnBoost, X, y, Ui.S(240, s), ctrlH, fUi);
-                y += ctrlH + Ui.S(4, s);
-                y = LayoutNote(_lblBoostNote, X, leftW, y, s, f8);
-
-                y = LayoutTitle(_secOsd, X, leftW, y, s, fBold);
-                Place(_lblHintMode, X, y + Ui.S(3, s), Ui.S(76, s), h8, f8);
-                Place(_cmbOsdHint, X + Ui.S(78, s), y, Ui.S(140, s), Ui.S(24, s), fUi);
-                y += Ui.S(30, s);
-                int ow = (leftW - gap * 3) / 4;
-                FlatButton[] ob = new FlatButton[] { _btnOsdRestart, _btnOsdDiag, _btnOsdDir, _btnRecap };
-                for (int i = 0; i < ob.Length; i++) Place(ob[i], X + i * (ow + gap), y, ow, ctrlH, fUi);
-                y += ctrlH + Ui.S(4, s);
-                Place(_chkStartup, X, y + Ui.S(2, s), Ui.S(300, s), chkH, fUi);
-                y += Ui.S(32, s);
-
-                // ── 偏好设置：面板高度自动收在底部状态行之上；内容放不下就内部滚动
-                Place(_btnPrefs, X, y, leftW, ctrlH, fUi);
-                y += ctrlH + Ui.S(4, s);
-                int prefsH = Ui.S(300, s);        // 内容底约 296（含底部按钮行），留 4px 余量
-                int room = bottomY - y - gap;
-                if (prefsH > room) prefsH = room;
-                if (prefsH < Ui.S(80, s)) prefsH = Ui.S(80, s);
-                _pnlPrefs.Location = new Point(X, y);
-                _pnlPrefs.Size = new Size(leftW, prefsH);
-                _pnlPrefs.Visible = _prefsOpen;
-                LayoutPrefs(s, leftW);
-
-                // ── 右列：读数面板
-                int rx = X + leftW + Ui.S(12, s);
-                int rw = W - rx - X;
-                if (rw < Ui.S(240, s)) rw = Ui.S(240, s);
-                int rh = bottomY - topY - Ui.S(8, s);
-                _pnlReadout.Location = new Point(rx, topY);
-                _pnlReadout.Size = new Size(rw, rh);
-                _pnlReadout.Padding = new Padding(pad);
-
-                int innerW = rw - pad * 2 - 4;
-                int colW = innerW / 3;
-                int by = pad + Ui.S(4, s);
-                for (int i = 0; i < 3; i++) _big[i].Layout(pad + i * colW, by, colW, s, fBig, fUi, f8, fSub);
-
-                int ry = by + fBig.Height + Ui.S(46, s);   // 给"说明 + 副读数"两行留高度
-                _topLine.Location = new Point(pad, ry);
-                _topLine.Size = new Size(innerW, 1);
-                ry += Ui.S(10, s);
-
-                int[] rowStart = new int[] { 0, 4, 9 };
-                int[] rowCount = new int[] { 4, 5, 9 };
-                for (int c = 0; c < rowStart.Length; c++)
-                {
-                    if (c > 0)
-                    {
-                        _clusterLines[c - 1].Location = new Point(pad, ry);
-                        _clusterLines[c - 1].Size = new Size(innerW, 1);
-                        ry += Ui.S(10, s);
-                    }
-                    _clusterLabels[c].Font = f8;
-                    _clusterLabels[c].Location = new Point(pad, ry);
-                    _clusterLabels[c].Size = new Size(innerW, h8);
-                    ry += h8 + Ui.S(2, s);
-                    for (int r = 0; r < rowCount[c]; r++)
-                    {
-                        ReadoutRow row = _rows[rowStart[c] + r];
-                        if (!row.Visible) continue;          // 隐藏行不占位，下面的行顶上来（单风扇/单盘机型不出空行）
-                        row.Layout(ry, innerW + 4, rowH, s, f8, fVal, fValSmall, f8);
-                        ry += rowH;
-                    }
-                }
-
-                Place(_lblEnv, pad, rh - pad - h8 * 2 - Ui.S(4, s), innerW, h8, f8);
-                Place(_lblUnavail, pad, rh - pad - h8, innerW, h8, f8);
-            }
-            finally { _layoutBusy = false; ResumeRedraw(); }
-        }
-
-        private int LayoutTitle(SectionTitle t, int x, int w, int y, double s, Font f)
-        {
-            t.Font = f;
-            t.Location = new Point(x, y);
-            t.Size = new Size(w, Math.Max(Ui.S(24, s), Ui.TextH(f, s)));
-            return y + Ui.S(28, s);
-        }
-
-        private int LayoutNote(Label l, int x, int w, int y, double s, Font f)
-        {
-            int h = Ui.TextH(f, s);
-            l.Font = f;
-            l.Location = new Point(x, y);
-            l.Size = new Size(w, h);
-            return y + h + Ui.S(4, s);
-        }
-
-        private static void Place(Control c, int x, int y, int w, int h, Font f)
-        {
-            // 字体来自 Ui.F 缓存，同一实例不必重复赋值（赋值会触发 OnFontChanged → 布局+重画）
-            if (!object.ReferenceEquals(c.Font, f)) c.Font = f;
-            c.Location = new Point(x, y);
-            c.Size = new Size(w, h);
-        }
-
-        /// <summary>
-        /// 偏好设置内的排版。设计宽 456 / 高约 214（面板高 252 时留 38px 余量）：
-        ///   0    标题「托盘悬停提示」
-        ///   18   勾选列表（两列） ｜ 预览
-        ///   100  字数 ｜ 恢复默认
-        ///   112  图标显示 ｜ 变色阈值 + 三个数值框
-        ///   140  四个档位色块
-        ///   168  阈值说明（**独占整行**，之前放在色块右边导致横向溢出 + 横向滚动条）
-        ///   190  探测数据源
-        /// </summary>
-        /// <summary>
-        /// 偏好设置排版（设计宽 456，内容底 ≈258；面板高 277 时留 19px 余量）：
-        ///   0    标题「托盘悬停提示」
-        ///   22   勾选列表（竖排，8 项全显示）｜ 预览 + 字数 + 恢复默认
-        ///   182  图标显示 + 变色阈值
-        ///   210  「档位颜色」+ 四个色块 + 探测数据源
-        ///   240  阈值说明（整行，档位词与色块一致）
-        /// </summary>
-        /// <summary>
-        /// 偏好设置排版（方案 A 的核心：**宽度全部按面板实际宽度算**，绝不写死，因而不可能横向溢出）。
-        /// 竖向按设计值等比缩放，面板高度由 LayoutAll 给足（272 设计单位 > 内容 258），所以不需要滚动条。
-        ///   0    标题「托盘悬停提示」
-        ///   22   勾选列表（竖排 8 项）｜ 预览 + 字数 + 恢复默认
-        ///   182  图标显示 + 变色阈值（combo 吃掉剩余宽度）
-        ///   212  「档位颜色」+ 四色块 + 探测数据源
-        ///   242  阈值说明（整行）
-        /// </summary>
-        private void LayoutPrefs(double s, int panelW)
-        {
-            Font fUi = Ui.F(9F, false, false, s), f8 = Ui.F(8F, false, false, s);
-            int h8 = Ui.TextH(f8, s), gap = Ui.S(Ui.Gap, s);
-            int cw = panelW - Ui.S(2, s);                 // 扣掉面板边框
-            if (cw < Ui.S(200, s)) cw = Ui.S(200, s);
-
-            Place(_lblTrayTitle, 0, 0, cw, Ui.TextH(fUi, s), fUi);
-
-            // ── 左：勾选列表（竖排）  右：预览 + 字数 + 恢复默认
-            int listW = Math.Min(Ui.S(196, s), cw * 45 / 100);
-            int listH = Ui.S(152, s);
-            Place(_lstTray, 0, Ui.S(22, s), listW, listH, fUi);
-            int rx = listW + gap, rw = cw - rx;
-            int btnW = Ui.S(100, s);
-            if (rw < Ui.S(140, s)) rw = Ui.S(140, s);
-            Place(_lblTrayPreview, rx, Ui.S(22, s), rw, listH - Ui.S(52, s), f8);
-            Place(_lblTrayBudget, rx, Ui.S(22, s) + listH - Ui.S(44, s), Math.Max(Ui.S(60, s), rw - btnW - gap), h8, f8);
-            Place(_btnTrayDefault, cw - btnW, Ui.S(22, s) + listH - Ui.S(38, s), btnW, Ui.S(24, s), fUi);
-
-            // ── 图标显示 + 变色阈值（同一行；combo 宽度吃剩余空间，右侧三个数值框贴右）
-            int y = Ui.S(182, s);
-            int spW = Ui.S(44, s), spGap = Ui.S(6, s);
-            int spTotal = 3 * spW + 2 * spGap;
-            // 标签宽度按文字实测：写死 60px 在 125% DPI + 缩放后会吃掉第 4 个字（"图标显"/"变色阈"）
-            int iconLabelW = TextRenderer.MeasureText("图标显示", f8,
-                new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width + Ui.S(6, s);
-            int thLabelW = TextRenderer.MeasureText("变色阈值", f8,
-                new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Width + Ui.S(6, s);
-            int thX = cw - spTotal - thLabelW - gap;            // 「变色阈值 + 三个数值框」整体右对齐
-            int comboX = iconLabelW + gap;
-            int comboW = thX - gap - comboX;
-            if (comboW < Ui.S(80, s)) comboW = Ui.S(80, s);
-            Place(_lblTrayIcon, 0, y + Ui.S(3, s), iconLabelW, h8, f8);
-            Place(_cmbTrayIcon, comboX, y, comboW, Ui.S(22, s), fUi);
-            Place(_lblTrayTh, thX, y + Ui.S(3, s), thLabelW, h8, f8);
-            for (int i = 0; i < 3; i++)
-                Place(_numTrayTh[i], thX + thLabelW + gap + i * (spW + spGap), y, spW, Ui.S(22, s), fUi);
-
-            // ── 档位颜色：标题 + 四个色块（左） ｜ 探测数据源（右）
-            y = Ui.S(212, s);
-            int swW = Ui.S(42, s), swGap = Ui.S(6, s);
-            Place(_lblSwTitle, 0, y + Ui.S(2, s), Ui.S(68, s), h8, f8);
-            for (int i = 0; i < _swLevel.Length; i++)
-                Place(_swLevel[i], Ui.S(70, s) + i * (swW + swGap), y, swW, Ui.S(22, s), fUi);
-            // ── 阈值说明：独占整行
-            Place(_lblTrayHint, 0, Ui.S(242, s), cw, h8, f8);
-
-            // ── 底部一行两个按钮
-            int by = Ui.S(272, s);
-            Place(_btnColorDefault, 0, by, Ui.S(100, s), Ui.S(24, s), fUi);
-            Place(_btnSensorProbe, Ui.S(108, s), by, Ui.S(100, s), Ui.S(24, s), fUi);
-            Place(_chkColorRaw, Ui.S(216, s), by + Ui.S(1, s), cw - Ui.S(216, s),
-                Math.Max(Ui.S(22, s), Ui.TextH(fUi, s)), fUi);
-        }
-
-        /// <summary>「变色阈值」标签的预留宽度。</summary>
-        private static int spLabel_Reserve(double s) { return Ui.S(60, s) + Ui.S(8, s); }        /// <summary>展开/收起偏好设置。必须强制重排：窗口尺寸没变，否则会被"尺寸没变就早退"挡掉。</summary>
+        /// <summary>展开/收起偏好设置；高度由内容决定，统一由外层视口滚动。</summary>
         private void TogglePrefs()
         {
             _prefsOpen = !_prefsOpen;
@@ -2624,6 +2419,7 @@ namespace OpenMIFS
                             ? "有 " + fail.ToString(CultureInfo.InvariantCulture) + " 项未实现（读数区显示为 —）"
                             : "";
                         TrayText.CaptureSensorText(render);
+                        LayoutAll(true); // 新读数和长说明完成后立即重排，避免暂时沿用上一轮高度。
                     });
                 }
                 catch { _sensorBusy = false; }
@@ -3123,13 +2919,13 @@ namespace OpenMIFS
             else
             {
                 string miss = string.Join("、", unavailable.ToArray());
-                if (miss.Length > 40) miss = miss.Substring(0, 40) + "…";
                 _lblUnavail.Text = "不可用：" + miss;
             }
 
             TrayText.CaptureStatusText(snap.ToString());
             RefreshTrayPreview();
             _suppress = false;
+            LayoutAll(true);
 
             if (!_firstRefreshDone)
             {
@@ -4229,7 +4025,7 @@ namespace OpenMIFS
                 Caps.Load();
                 Log.Info("MIFS 接口    : " + (Mifs.Available ? "可用" : "不可用 - " + Mifs.LastError));
                 Log.Info("启动方式     : " + (tray ? "--tray（只驻留托盘）" : "常规（显示主界面）"));
-                if (MifsApp.IsElevated) Startup.RepairIfNeeded();   // 老任务不带 --tray 会自动重建
+                if (MifsApp.IsElevated) Startup.RepairIfNeeded();   // 迁移旧任务的托盘参数、电池条件和运行时长上限
 
                 try { Application.Run(new TrayContext(tray)); }
                 catch (Exception ex) { Log.Ex("主循环异常退出", ex); if (ex.StackTrace != null) Log.Info("异常堆栈：" + ex.StackTrace.Replace("\r\n", " | ")); throw; }

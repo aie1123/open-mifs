@@ -34,6 +34,7 @@ if (-not $Icon)   { $Icon   = Join-Path $repoRoot 'assets\icon.ico' }
 
 $sources  = @(
     (Join-Path $repoRoot 'src\csharp\OpenMIFS.cs'),
+    (Join-Path $repoRoot 'src\csharp\MainForm.Layout.cs'),
     (Join-Path $repoRoot 'src\csharp\Sensors.cs'),
     (Join-Path $repoRoot 'src\csharp\Ui.cs')
 )
@@ -78,7 +79,7 @@ if (Test-Path $outExe) { Remove-Item $outExe -Force }
 
 # ── 3. 组装编译参数
 # System.Core.dll 提供 System.Diagnostics.Eventing.Reader（OSD 诊断要查事件日志）
-$refs = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Management.dll')
+$refs = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Management.dll', 'System.Xml.dll')
 $argList = New-Object System.Collections.Generic.List[string]
 $argList.Add('/nologo')
 $argList.Add('/target:winexe')          # GUI 程序，不弹控制台窗口

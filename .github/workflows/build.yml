@@ -84,6 +84,14 @@ jobs:
         shell: pwsh
         run: ./build/build.ps1
 
+      - name: 自启任务回归检查
+        shell: powershell
+        run: ./build/test-startup.ps1
+
+      - name: UI 布局回归检查
+        shell: powershell
+        run: ./build/test-layout.ps1 -NoScreenshots
+
       - name: 记录产物信息
         shell: pwsh
         run: |
