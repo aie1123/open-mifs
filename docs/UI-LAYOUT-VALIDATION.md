@@ -29,6 +29,9 @@ powershell -ExecutionPolicy Bypass -File build\test-startup.ps1
 ```
 
 CI 可用 `-NoScreenshots` 跳过 DWM 屏幕截图；它仍运行真实 WinForms 控件测量。
+测试临时放宽窗口最大尺寸，通过原生 `SetWindowPos` 设置窗口尺寸并断言实际客户区与请求值一致，避免 CI 小桌面把 1200 / 1500 像素场景截成屏幕大小。
+最大化检查前恢复默认最大尺寸约束。
+另检查大于当前桌面最大跟踪尺寸的布局；不修改系统分辨率或生产代码。
 几何测试把传感器刷新在临时副本中隔离，并明确标识排版样本；`-ToggleTest` 则保留真实刷新与托盘路径。
 
 ## 本机证据

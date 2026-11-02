@@ -18,7 +18,7 @@ internal static class LayoutHarness
     private static double CurrentScale = 1;
     [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
     [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RectangleRect value, int size);
-    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll", SetLastError=true)] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [StructLayout(LayoutKind.Sequential)] private struct RectangleRect { public int Left, Top, Right, Bottom; }
 
     private static object Field(object obj, string name) { return obj.GetType().GetField(name, Members).GetValue(obj); }
@@ -98,6 +98,19 @@ internal static class LayoutHarness
         Application.DoEvents();
     }
 
+    private static void SetClientSizeForTest(MainForm form,Size size)
+    {
+        // Form.ClientSize passes through Form.SetBoundsCore, which clamps large tests to the runner desktop.
+        // Set the native window bounds instead, then require the requested client size before measuring layout.
+        int frameWidth=form.Width-form.ClientSize.Width;
+        int frameHeight=form.Height-form.ClientSize.Height;
+        if(!SetWindowPos(form.Handle,IntPtr.Zero,0,0,size.Width+frameWidth,size.Height+frameHeight,0x0016))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        Application.DoEvents();
+        form.PerformLayout();
+        if(form.ClientSize!=size)throw new Exception("Requested layout size "+size+" but actual client size is "+form.ClientSize);
+    }
+
     private static void Screenshot(MainForm form,string path)
     {
         SetWindowPos(form.Handle,new IntPtr(-1),40,40,0,0,0x0001|0x0040);
@@ -125,6 +138,7 @@ internal static class LayoutHarness
                 form.StartPosition=FormStartPosition.Manual;
                 form.Location=new Point(40,40);
                 form.Show();
+                form.MaximumSize=new Size(16384,16384); // Allow native test windows beyond the runner desktop.
                 StopTimers(form);
                 SeedText(form);
                 typeof(MainForm).GetField("_prefsOpen",Members).SetValue(form,true);
@@ -142,7 +156,7 @@ internal static class LayoutHarness
                         {
                         typeof(MainForm).GetField("_prefsOpen",Members).SetValue(form,prefsOpen);
                         ((Control)Field(form,"_btnElevate")).Visible=elevate;
-                        form.ClientSize=size;
+                        SetClientSizeForTest(form,size);
                         Control viewport=typeof(MainForm).GetField("_viewport",Members)==null?null:(Control)Field(form,"_viewport");
                         if(viewport!=null)((Panel)viewport).AutoScrollPosition=Point.Empty;
                         Call(form,"LayoutAll",true);
@@ -168,14 +182,19 @@ internal static class LayoutHarness
                 {
                     typeof(MainForm).GetField("_testDpiScale",Members).SetValue(form,1.0);
                     CurrentScale=1;
+                    SetClientSizeForTest(form,new Size(SystemInformation.MaxWindowTrackSize.Width+64,SystemInformation.MaxWindowTrackSize.Height+64));
+                    Call(form,"LayoutAll",true);
+                    CheckChildren(form,"beyond-desktop-size");
+                    form.MaximumSize=Size.Empty;
                     form.WindowState=FormWindowState.Maximized;
                     Application.DoEvents();
                     Call(form,"LayoutAll",true);
                     CheckChildren(form,"maximized");
                     form.WindowState=FormWindowState.Normal;
+                    Application.DoEvents();
                     for(int i=0;i<20;i++)
                     {
-                        form.ClientSize=new Size(i%2==0?560:1200,i%2==0?420:800);
+                        SetClientSizeForTest(form,new Size(i%2==0?560:1200,i%2==0?420:800));
                         Call(form,"LayoutAll",true);
                         Application.DoEvents();
                     }
