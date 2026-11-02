@@ -192,6 +192,10 @@ internal static class LayoutHarness
                     CheckChildren(form,"maximized");
                     form.WindowState=FormWindowState.Normal;
                     Application.DoEvents();
+                    form.MaximumSize=new Size(16384,16384);
+                    SetClientSizeForTest(form,new Size(SystemInformation.MaxWindowTrackSize.Width+64,SystemInformation.MaxWindowTrackSize.Height+64));
+                    Call(form,"LayoutAll",true);
+                    CheckChildren(form,"restored-beyond-desktop-size");
                     for(int i=0;i<20;i++)
                     {
                         SetClientSizeForTest(form,new Size(i%2==0?560:1200,i%2==0?420:800));
